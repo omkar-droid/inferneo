@@ -176,7 +176,10 @@ class EngineConfig:
     scheduler_type: SchedulerType = SchedulerType.FAIR
     max_batch_size: int = 32
     max_wait_time: float = 0.1
-    
+    # Scheduler fields consumed by Scheduler (see SchedulerConfig defaults)
+    max_num_partial_prefills: int = 2
+    max_waiting_tokens: int = 2048
+
     def __post_init__(self):
         """Load configuration from environment variables"""
         # Model settings
