@@ -77,8 +77,12 @@ def bench_inferneo(model: str, device: str, n: int, batch: int):
     reqs = make_requests(n)
     prompts = [r.prompt for r in reqs]
     params = [SamplingParams(max_tokens=r.max_new_tokens, temperature=0) for r in reqs]
+    # Warm up: first FlashInfer step JIT-compiles kernels (cached to disk after).
+    llm.generate(prompts[: min(4, n)], params[: min(4, n)])
+    _sync(device)
     t0 = time.time()
     outs = llm.generate(prompts, params)
+    _sync(device)
     dt = time.time() - t0
     tokens = sum(len(o.outputs[0].token_ids) for o in outs)
     return tokens, dt
