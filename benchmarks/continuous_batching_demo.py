@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Continuous batching vs. static batching, with correctness check.
+"""Padded continuous batching vs. static batching, with correctness check.
+
+This drives the *baseline* engine (benchmarks/baselines/hf_padded_engine.py),
+not the paged inferneo engine.
 
 Static batching runs a wave of requests until the *longest* one finishes, so
 short requests hold GPU slots idle. Continuous batching evicts finished
@@ -8,15 +11,19 @@ ragged output lengths, continuous batching finishes the same work faster.
 
 Run from the repo root:
 
-    PYTHONPATH=. python benchmarks/continuous_batching_demo.py
+    python benchmarks/continuous_batching_demo.py
 """
 
 import random
+import sys
 import time
+from pathlib import Path
 
 import torch
 
-from inferneo.core.continuous_batching import ContinuousBatchingEngine, Request
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from benchmarks.baselines.hf_padded_engine import ContinuousBatchingEngine, Request  # noqa: E402
 
 MODEL = "gpt2"
 MAX_BATCH = 16
@@ -27,6 +34,13 @@ BASE_PROMPTS = [
     "Quantum computing works by", "Climate change is caused by",
     "The recipe for a good pizza starts with", "History teaches us that",
 ]
+
+
+def _sync(device: str) -> None:
+    if device == "cuda":
+        torch.cuda.synchronize()
+    elif device == "mps":
+        torch.mps.synchronize()
 
 
 def make_requests():
@@ -75,10 +89,10 @@ def main():
 
     # ---- Continuous batching ----
     reqs = make_requests()
-    torch.cuda.synchronize()
+    _sync(engine.device)
     t0 = time.time()
     cont = engine.run(reqs)
-    torch.cuda.synchronize()
+    _sync(engine.device)
     cont_dt = time.time() - t0
     cont_tokens = sum(len(r.generated) for r in cont.values())
 
