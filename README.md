@@ -15,10 +15,22 @@ hardware, even when inferneo loses.
 
 | Component | Status |
 |---|---|
-| Padded continuous-batching baseline (HF models, own decode loop) | ✅ working, correctness-verified vs static batching |
-| Paged-KV engine (block tables, token-budget scheduler) | 🚧 in progress |
-| OpenAI-compatible server | ⏳ planned |
-| Prefix caching, speculative decoding, P/D disaggregation | ⏳ research roadmap |
+| Paged-KV engine: block tables, unified token-budget scheduler, continuous batching, chunked prefill, preemption | ✅ working, greedy output matches HF token-for-token (incl. TinyLlama-1.1B on CPU/MPS/CUDA) |
+| Llama-family models (Llama 2/3, TinyLlama, Mistral) via HF safetensors | ✅ |
+| Sampler: temperature, top-k / top-p / min-p, penalties, seeds, logprobs | ✅ |
+| Offline `LLM` API | ✅ |
+| Hash-chain prefix caching | ✅ (opt-in: `enable_prefix_caching=True`) |
+| FlashInfer CUDA fast path | 🚧 Phase 2 (SDPA reference backend works everywhere now) |
+| OpenAI-compatible server | ⏳ Phase 3 |
+| Speculative decoding, P/D disaggregation, radix cache | ⏳ research roadmap |
+
+```python
+from inferneo import LLM, SamplingParams
+
+llm = LLM("TinyLlama/TinyLlama-1.1B-Chat-v1.0")
+outs = llm.generate(["The capital of France is"], SamplingParams(max_tokens=32))
+print(outs[0].outputs[0].text)
+```
 
 Earlier revisions of this repository contained placeholder engine code and benchmark
 reports generated against it. Those numbers were meaningless and are retracted; the
@@ -41,8 +53,20 @@ history is preserved in git.
 ```bash
 pip install -e ".[dev]"
 
-# Run the padded continuous-batching baseline demo (any device: cuda/mps/cpu)
+# Offline generation with the paged engine (any device: cuda/mps/cpu)
+python examples/offline_inference.py
+
+# Compare the paged engine against the padded baseline
+python benchmarks/offline_throughput.py
+
+# Padded continuous-batching baseline demo, with correctness check
 python benchmarks/continuous_batching_demo.py
+```
+
+Run the tests (CPU only, seconds):
+
+```bash
+pytest            # unit tests (torch-free scheduler/KV) + correctness vs HF
 ```
 
 ## Benchmarks
