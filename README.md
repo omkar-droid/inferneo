@@ -21,8 +21,8 @@ hardware, even when inferneo loses.
 | Offline `LLM` API | ✅ |
 | Hash-chain prefix caching | ✅ (opt-in: `enable_prefix_caching=True`) |
 | FlashInfer CUDA fast path | ✅ auto-selected on CUDA (fp16/bf16, head_dim 64/128/256); SDPA reference elsewhere |
-| OpenAI-compatible server | ⏳ Phase 3 |
-| CUDA graphs, on-GPU sampling (perf) | ⏳ Phase 5 — the main gap vs vLLM |
+| OpenAI-compatible server | ✅ `/v1/completions`, `/v1/chat/completions` (+SSE), `/v1/models`, `/health` |
+| CUDA graphs, on-GPU sampling (perf) | ⏳ next — the main gap vs vLLM |
 | Speculative decoding, P/D disaggregation, radix cache | ⏳ research roadmap |
 
 On an H100 NVL (TinyLlama-1.1B, fp16, 200 ragged requests) inferneo's paged +
@@ -38,6 +38,14 @@ from inferneo import LLM, SamplingParams
 llm = LLM("TinyLlama/TinyLlama-1.1B-Chat-v1.0")
 outs = llm.generate(["The capital of France is"], SamplingParams(max_tokens=32))
 print(outs[0].outputs[0].text)
+```
+
+Or run it as an OpenAI-compatible server:
+
+```bash
+inferneo serve --model TinyLlama/TinyLlama-1.1B-Chat-v1.0 --port 8000
+curl http://localhost:8000/v1/chat/completions -H 'Content-Type: application/json' \
+  -d '{"model":"tinyllama","messages":[{"role":"user","content":"Hi!"}],"stream":true}'
 ```
 
 Earlier revisions of this repository contained placeholder engine code and benchmark

@@ -12,7 +12,8 @@ def tiny_model_dir(tmp_path_factory) -> str:
 
     torch.manual_seed(0)
     config = LlamaConfig(
-        vocab_size=512,
+        # vocab matches the llama tokenizer so text-prompt paths (server) work.
+        vocab_size=32000,
         hidden_size=64,
         intermediate_size=128,
         num_hidden_layers=2,
