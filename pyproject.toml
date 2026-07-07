@@ -1,0 +1,51 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "inferneo"
+version = "0.1.0"
+description = "A research testbed for LLM inference serving: paged-KV continuous batching, honest benchmarks, hackable internals"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+dependencies = [
+    "torch>=2.4",
+    "transformers>=4.51",
+    "tokenizers>=0.21",
+    "safetensors>=0.4",
+    "huggingface-hub>=0.30",
+    "numpy",
+]
+
+[project.optional-dependencies]
+cuda = ["flashinfer-python"]
+server = [
+    "fastapi>=0.115",
+    "uvicorn>=0.34",
+    "pydantic>=2.9",
+    "prometheus-client>=0.21",
+]
+dev = [
+    "pytest>=8",
+    "ruff>=0.8",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["inferneo"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+markers = [
+    "gpu: tests requiring a CUDA GPU (run manually on a GPU box)",
+    "slow: slow tests (model downloads, long generations)",
+]

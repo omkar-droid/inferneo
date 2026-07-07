@@ -1,12 +1,12 @@
-"""Continuous batching engine — Option 1: own the decode loop.
+"""Padded continuous-batching baseline — owns the decode loop over an HF model.
 
-A minimal but correct token-level continuous-batching runner. Requests are
-admitted into a running batch and evicted the moment they finish, and freed
-slots are backfilled from the waiting queue — so the GPU stays busy across a
-stream of ragged requests instead of waiting for the slowest sequence in a
-static batch. This is the core idea behind vLLM and SGLang.
+This is the honest internal baseline the paged inferneo engine is benchmarked
+against. It implements token-level continuous batching: requests are admitted
+into a running batch, evicted the moment they finish, and freed slots are
+backfilled from the waiting queue — so the GPU stays busy across a stream of
+ragged requests instead of waiting for the slowest sequence in a static batch.
 
-This engine owns the decode loop over a HuggingFace model:
+Mechanics:
   * batched forward passes with explicit left-padding + position_ids
   * ``index_select`` eviction of finished rows from the KV cache
   * admission by prefilling *only the new* requests and merging their KV into
@@ -14,9 +14,9 @@ This engine owns the decode loop over a HuggingFace model:
 
 The KV merge pads the shorter cache along the sequence axis and concatenates
 along the batch axis. It is verified to match a jointly-prefilled batch, and
-greedy decoding matches per-sequence generation token-for-token. A paged KV
-cache (v1) would replace padded merges with block tables to avoid the padding
-waste — the natural next step toward vLLM-class efficiency.
+greedy decoding matches per-sequence generation token-for-token. The paged
+inferneo engine replaces these padded merges with block tables to avoid the
+padding waste.
 """
 
 from __future__ import annotations
@@ -28,6 +28,15 @@ from dataclasses import dataclass, field
 import torch
 import torch.nn.functional as F
 from transformers import AutoModelForCausalLM, AutoTokenizer
+
+
+def pick_device() -> str:
+    """Best available device: cuda > mps > cpu."""
+    if torch.cuda.is_available():
+        return "cuda"
+    if torch.backends.mps.is_available():
+        return "mps"
+    return "cpu"
 
 
 @dataclass
@@ -48,7 +57,10 @@ class ContinuousBatchingEngine:
     """Token-level continuous batching over a HuggingFace causal LM."""
 
     def __init__(self, model_name: str = "gpt2", max_batch_size: int = 32,
-                 device: str = "cuda", dtype: torch.dtype = torch.float16):
+                 device: str | None = None, dtype: torch.dtype | None = None):
+        device = device or pick_device()
+        if dtype is None:
+            dtype = torch.float16 if device in ("cuda", "mps") else torch.float32
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         self.tokenizer.padding_side = "left"
         if self.tokenizer.pad_token is None:

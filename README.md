@@ -1,173 +1,52 @@
 # Inferneo
 
-A high-performance LLM inference engine with advanced features like smart batching, CUDA graph optimization, PagedAttention memory management, speculative decoding, multi-level caching, async-first architecture, plugin system, hot reloading, distributed readiness, and production features such as health monitoring and rate limiting.
+A research testbed for LLM inference serving.
 
-## Features
+Inferneo is a small, readable inference engine in the spirit of vLLM and SGLang: real
+paged-KV continuous batching, an OpenAI-compatible server (planned), and honest benchmarks —
+designed so that a scheduling / KV-cache / disaggregation idea from a paper is a small diff,
+not a fork of a 500k-line production engine.
 
-- **Smart Batching**: Dynamic batch size optimization based on request patterns
-- **CUDA Graph Optimization**: Pre-compiled CUDA graphs for maximum GPU utilization
-- **PagedAttention**: Efficient memory management for long sequences
-- **Speculative Decoding**: Parallel token generation for faster inference
-- **Multi-Level Caching**: Model, KV, and result caching for optimal performance
-- **Async-First Architecture**: Non-blocking I/O and concurrent request processing
-- **Plugin System**: Extensible architecture for custom optimizations
-- **Hot Reloading**: Model updates without service interruption
-- **Distributed Readiness**: Multi-GPU and multi-node support
-- **Production Features**: Health monitoring, rate limiting, and metrics
+**It does not claim to beat vLLM on throughput.** It claims to be understandable, correct,
+and measurable. Every benchmark published here includes the vLLM number on the same
+hardware, even when inferneo loses.
 
-## Installation
+## What works today
 
-```bash
-# Create and activate a virtual environment (recommended)
-python3 -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
+| Component | Status |
+|---|---|
+| Padded continuous-batching baseline (HF models, own decode loop) | ✅ working, correctness-verified vs static batching |
+| Paged-KV engine (block tables, token-budget scheduler) | 🚧 in progress |
+| OpenAI-compatible server | ⏳ planned |
+| Prefix caching, speculative decoding, P/D disaggregation | ⏳ research roadmap |
 
-# Install core and development dependencies
-pip install -r requirements.txt
-```
-> **Note:** Some dependencies (e.g., `auto-gptq`, `tensorrt`) are optional and may require CUDA or special hardware. If you encounter issues, comment them out in `requirements.txt` and install only what you need.
+Earlier revisions of this repository contained placeholder engine code and benchmark
+reports generated against it. Those numbers were meaningless and are retracted; the
+history is preserved in git.
 
-## Running Tests
+## Architecture (target)
 
-You can run all tests and checks using the test runner:
+- **Control plane** (`inferneo/engine/`, `inferneo/kv/`): pure Python, no torch imports.
+  A vLLM-V1-style unified scheduler (no prefill/decode distinction — each step schedules
+  `{request: num_tokens}` under a token budget) and a block-based KV cache manager with
+  hash-chain prefix caching.
+- **Tensor plane** (`inferneo/executor/`, `inferneo/attention/`, `inferneo/models/`,
+  `inferneo/sampling/`): PyTorch. Flat varlen batching (no padding), pluggable attention
+  backends — pure-torch SDPA reference (CPU/MPS/CUDA) and FlashInfer (CUDA fast path).
+- **Serving plane** (`inferneo/server/`): FastAPI OpenAI-compatible API behind an
+  `EngineClient` protocol.
 
-```bash
-python tests/run_tests.py
-```
-
-Or run specific test types:
-
-```bash
-python tests/run_tests.py --unit         # Unit tests
-python tests/run_tests.py --integration  # Integration tests
-python tests/run_tests.py --performance  # Performance tests
-python tests/run_tests.py --coverage     # Coverage report
-python tests/run_tests.py --lint         # Linting
-python tests/run_tests.py --type-check   # Type checking
-python tests/run_tests.py --benchmarks   # Run benchmarks
-python tests/run_tests.py --all          # Run all tests and checks
-```
-
-You can also use `pytest` directly:
+## Quick start
 
 ```bash
-pytest tests/ -v
+pip install -e ".[dev]"
+
+# Run the padded continuous-batching baseline demo (any device: cuda/mps/cpu)
+python benchmarks/continuous_batching_demo.py
 ```
 
-## Running Benchmarks
+## Benchmarks
 
-Benchmarks are managed via scripts in `benchmarks/runners/`. Example commands:
-
-```bash
-# Run Inferneo latency benchmark
-python -m benchmarks.runners.inferneo_runner --scenario latency --model gpt2
-
-# Run Triton throughput benchmark
-python -m benchmarks.runners.triton_runner --scenario throughput --model distilgpt2
-
-# Run head-to-head comparison
-python -m benchmarks.runners.comparison_runner --models gpt2,distilgpt2 --scenarios latency,throughput
-
-# Run comprehensive benchmark suite
-python -m benchmarks.runners.comparison_runner --comprehensive
-```
-
-See [`benchmarks/README.md`](benchmarks/README.md) for more details and advanced options.
-
-## Examples
-
-See the `examples/` directory for:
-
-- **Basic usage:** `examples/basic/basic_usage.py`
-- **Advanced features:** `examples/advanced/`
-- **Multi-model serving:** `examples/multi_model/multi_model_serving.py`
-
-## Project Structure
-
-```
-inferneo/
-├── inferneo/
-│   ├── core/
-│   │   ├── engine.py         # Main InferneoEngine
-│   │   ├── enhanced_engine.py # Enhanced multi-model engine
-│   │   ├── config.py         # Configuration management
-│   │   ├── scheduler.py      # Request scheduling
-│   │   ├── memory_manager.py # Memory management
-│   │   └── cache_manager.py  # Caching system
-│   ├── models/
-│   │   ├── base.py          # Base model interface
-│   │   ├── manager.py       # Model manager with lazy loading
-│   │   ├── registry.py      # Model registry
-│   │   ├── transformers.py  # HuggingFace models
-│   │   ├── onnx/           # ONNX model support
-│   │   └── tensorrt/       # TensorRT model support
-│   └── __init__.py
-├── benchmarks/
-│   ├── runners/
-│   ├── scenarios/
-│   ├── utils/
-│   └── ...
-├── examples/
-├── tests/
-│   ├── unit/
-│   ├── integration/
-│   └── performance/
-└── docs/                 # Documentation
-```
-
-## Basic Usage
-
-```python
-from inferneo.core.engine import InferneoEngine
-from inferneo.core.config import EngineConfig
-
-# Configure the engine
-config = EngineConfig(
-    model="meta-llama/Llama-2-7b-chat-hf",
-    max_model_len=4096,
-    gpu_memory_utilization=0.9
-)
-
-# Initialize and start the engine
-engine = InferneoEngine(config)
-engine.start()
-
-# Generate text
-result = engine.generate(
-    prompt="Hello, how are you?",
-    max_tokens=100,
-    temperature=0.7
-)
-
-print(result.text)
-engine.stop()
-```
-
-## Performance Comparison
-
-| Feature | Inferneo | vLLM | NVIDIA Triton |
-|---------|----------|------|---------------|
-| Smart Batching | ✅ | ✅ | ✅ |
-| CUDA Graphs | ✅ | ✅ | ✅ |
-| PagedAttention | ✅ | ✅ | ❌ |
-| Speculative Decoding | ✅ | ✅ | ❌ |
-| Multi-Model Serving | ✅ | ❌ | ✅ |
-| Hot Reloading | ✅ | ❌ | ✅ |
-| Plugin System | ✅ | ❌ | ✅ |
-| Async Architecture | ✅ | ✅ | ✅ |
-
-## Contributing
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Add tests
-5. Submit a pull request
-
-## License
-
-MIT License - see LICENSE file for details.
-
----
-
-**Inferneo** - Accelerating AI inference to new heights! 🚀
+See `benchmarks/`. Methodology: same GPU, same model, same dtype, warmed servers, 3 runs
+per point; TTFT/ITL percentiles, output tok/s, and goodput under an SLO; vLLM (pinned
+version, flags recorded) as the external baseline.
