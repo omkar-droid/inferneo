@@ -43,6 +43,16 @@ class Sampler:
         self, logits: torch.Tensor, states: list[RequestSamplerState]
     ) -> tuple[list[int], list[TokenLogprob | None]]:
         """``logits``: [len(states), vocab], one row per sampling request."""
+        # Fast path: the whole batch is greedy, no penalties, no logprobs.
+        # argmax on-device, a single small sync — no full-vocab CPU transfer,
+        # no Python per-row loop. This is the common decode case.
+        if all(
+            s.params.greedy and s.params.logprobs is None and not s.params.needs_penalties
+            for s in states
+        ):
+            tokens = logits.argmax(dim=-1).tolist()
+            return tokens, [None] * len(states)
+
         rows = logits.detach().to(torch.float32).cpu()
         tokens: list[int] = []
         logprobs: list[TokenLogprob | None] = []

@@ -20,9 +20,17 @@ hardware, even when inferneo loses.
 | Sampler: temperature, top-k / top-p / min-p, penalties, seeds, logprobs | ✅ |
 | Offline `LLM` API | ✅ |
 | Hash-chain prefix caching | ✅ (opt-in: `enable_prefix_caching=True`) |
-| FlashInfer CUDA fast path | 🚧 Phase 2 (SDPA reference backend works everywhere now) |
+| FlashInfer CUDA fast path | ✅ auto-selected on CUDA (fp16/bf16, head_dim 64/128/256); SDPA reference elsewhere |
 | OpenAI-compatible server | ⏳ Phase 3 |
+| CUDA graphs, on-GPU sampling (perf) | ⏳ Phase 5 — the main gap vs vLLM |
 | Speculative decoding, P/D disaggregation, radix cache | ⏳ research roadmap |
+
+On an H100 NVL (TinyLlama-1.1B, fp16, 200 ragged requests) inferneo's paged +
+FlashInfer engine runs at **7,671 tok/s** — ~5× a naive padded baseline, and
+~6× behind **vLLM's 47,094 tok/s**. The gap is per-step overhead (no CUDA
+graphs yet), not the attention kernel; output is token-for-token identical to
+HuggingFace. See [benchmarks/README.md](benchmarks/README.md) for the honest
+breakdown.
 
 ```python
 from inferneo import LLM, SamplingParams
