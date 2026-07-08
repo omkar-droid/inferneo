@@ -20,22 +20,25 @@ stays in.
 | Engine | tok/s | Relative |
 |---|---:|---:|
 | vLLM 0.24.0 (CUDA graphs) | 47,094 | 1.00× |
+| **inferneo (FlashInfer + CUDA graphs)** | **17,640** | **0.37×** |
 | inferneo (FlashInfer, eager) | 7,671 | 0.16× |
 | inferneo padded baseline | 1,498 | 0.03× |
 | inferneo (SDPA reference, eager) | 389 | 0.008× |
 
 **Reading this honestly:** inferneo's paged + FlashInfer engine is correct
-(greedy output matches HuggingFace token-for-token) and already ~5× the naive
-padded baseline, but it is ~6× behind vLLM. The gap is not the attention kernel
-(both use FlashInfer-class kernels) — it is per-step overhead:
+(greedy output matches HuggingFace token-for-token). CUDA graphs on the decode
+step give a **2.3× speedup** (7,671 → 17,640 tok/s) by collapsing the hundreds
+of per-step kernel launches into one replay, closing the gap to vLLM from ~6× to
+~2.7×. The remaining gap is per-step *host* overhead, not the GPU work:
 
-1. **No CUDA graphs.** inferneo runs eager, so every decode step pays full
-   Python + kernel-launch cost. vLLM captures the decode step in a CUDA graph.
-   This is the single largest lever and the top Phase-5 optimization.
-2. **Per-step host work.** Rebuilding index tensors from Python lists and
-   calling FlashInfer `plan()` every step; vLLM reuses persistent buffers.
-3. **Sampling.** A batched greedy fast path (on-GPU argmax, single sync) is in;
+1. **Per-step host work.** The scheduler builds a `SchedulerOutput` in Python and
+   the runner rebuilds index tensors and calls FlashInfer `plan()` every step;
+   vLLM overlaps and amortizes more of this. This is now the largest remaining lever.
+2. **Sampling.** A batched greedy fast path (on-GPU argmax, single sync) is in;
    the general sampler still round-trips to CPU. Full on-GPU sampling is next.
+
+CUDA graphs cover *pure-decode* steps (every request advances one token); prefill
+and mixed steps run eager. Toggle with `enable_cuda_graph=False`.
 
 The point of inferneo is that closing each of these is a small, isolated change
 against a readable engine — not a fork of a production system.

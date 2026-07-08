@@ -35,6 +35,7 @@ each request, and prefill / decode / chunked-prefill all fall out of that automa
 - **Hash-chain prefix caching** for shared prompts (opt-in).
 - **Full sampler**: temperature, top-k / top-p / min-p, presence / frequency / repetition
   penalties, seeds, and logprobs.
+- **CUDA graphs** on the decode step — captured per batch-size bucket, ~2.3× faster decode.
 - **OpenAI-compatible server**: `/v1/completions` and `/v1/chat/completions` with SSE streaming.
 - **Torch-free control plane** — the scheduler and KV manager import without torch, so they
   run in CPU CI and stay hackable and backend-portable.
@@ -136,13 +137,15 @@ Honest measurement only — same GPU, same model, same dtype, warmed, with vLLM 
 | Engine | tok/s | vs vLLM |
 |---|---:|---:|
 | vLLM 0.24.0 (CUDA graphs) | 47,094 | 1.00× |
-| **inferneo** (FlashInfer, eager) | **7,671** | 0.16× |
+| **inferneo** (FlashInfer + CUDA graphs) | **17,640** | 0.37× |
+| inferneo (FlashInfer, eager) | 7,671 | 0.16× |
 | inferneo padded baseline | 1,498 | 0.03× |
 | inferneo SDPA reference | 389 | 0.008× |
 
-Inferneo is correct and ~5× the naive baseline, but ~6× behind vLLM. The gap is **per-step
-overhead** in eager execution — not the attention kernel, which is FlashInfer for both.
-Full methodology and breakdown: [benchmarks/README.md](benchmarks/README.md).
+Inferneo is correct and, with CUDA graphs, ~2.7× behind vLLM (a 2.3× jump over its own eager
+path). The remaining gap is per-step **host** overhead — Python scheduling and FlashInfer
+`plan()` each step — not the GPU work. Full methodology and breakdown:
+[benchmarks/README.md](benchmarks/README.md).
 
 ## Correctness
 

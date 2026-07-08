@@ -14,6 +14,7 @@ slot id ``block_id * page_size + offset`` for scatter.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import torch
@@ -26,6 +27,10 @@ class FlashInferMetadata:
     # Physical (block_id, offset) for each new token's k/v this step.
     block_ids: torch.Tensor  # [num_tokens]
     offsets: torch.Tensor  # [num_tokens]
+    # attend(q, kv_cache) -> attention output. Carried here (rather than a
+    # fixed self._wrapper) so the CUDA-graph decode path can substitute a
+    # graph-mode decode wrapper without the model knowing.
+    attend: Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
 
 
 class FlashInferBackend(AttentionBackend):
@@ -96,6 +101,7 @@ class FlashInferBackend(AttentionBackend):
         return FlashInferMetadata(
             block_ids=torch.cat(block_chunks).to(dev),
             offsets=torch.cat(offset_chunks).to(dev),
+            attend=self._wrapper.run,
         )
 
     def forward(
@@ -109,4 +115,4 @@ class FlashInferBackend(AttentionBackend):
         # Scatter new k/v into their pages: kv_cache[block, 0|1, offset].
         kv_cache[metadata.block_ids, 0, metadata.offsets] = k
         kv_cache[metadata.block_ids, 1, metadata.offsets] = v
-        return self._wrapper.run(q, kv_cache)
+        return metadata.attend(q, kv_cache)
