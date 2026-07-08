@@ -133,6 +133,7 @@ def build_engine_config(
     max_num_seqs: int = 64,
     max_num_batched_tokens: int = 2048,
     seed: int | None = None,
+    enable_cuda_graph: bool = True,
     trust_remote_code: bool = False,
     revision: str | None = None,
 ) -> EngineConfig:
@@ -158,4 +159,5 @@ def build_engine_config(
         ),
         device=device,
         seed=seed,
+        enable_cuda_graph=enable_cuda_graph,
     )

@@ -68,6 +68,7 @@ class TorchModelRunner:
         self.dtype = resolve_dtype(config.model.dtype, self.device)
         self._states: dict[str, RequestSamplerState] = {}
         self.kv_caches: list[torch.Tensor] = []
+        self.graph_runner = None
 
     def load_model(self) -> None:
         hf_config = load_hf_config(self.config.model)
@@ -104,6 +105,10 @@ class TorchModelRunner:
             free, total = torch.cuda.mem_get_info(self.device)
             already_used = total - free
             budget = int(total * cache_cfg.gpu_memory_utilization) - already_used
+            if self.config.enable_cuda_graph:
+                # Leave headroom for forward activations + captured graph pools;
+                # otherwise the KV cache eats all memory and capture OOMs.
+                budget = int(budget * 0.85)
             num_blocks = budget // self._kv_shape.block_bytes(block_size, self.dtype)
         else:
             num_blocks = -(-_DEFAULT_NON_CUDA_KV_TOKENS // block_size)
@@ -112,11 +117,40 @@ class TorchModelRunner:
                 f"only {num_blocks} KV blocks fit; lower gpu_memory_utilization "
                 f"pressure or set CacheConfig.num_blocks explicitly"
             )
+        # Physical block `num_blocks` is a reserved scratch page for CUDA-graph
+        # padding rows; the engine only ever hands out blocks [0, num_blocks).
+        self._scratch_block_id = num_blocks
         self.kv_caches = [
-            self.backend.make_kv_cache(num_blocks)
+            self.backend.make_kv_cache(num_blocks + 1)
             for _ in range(self._kv_shape.num_layers)
         ]
+        self._maybe_build_graphs()
         return num_blocks
+
+    def _maybe_build_graphs(self) -> None:
+        from inferneo.attention.flashinfer_backend import FlashInferBackend
+
+        if not (
+            self.config.enable_cuda_graph
+            and self.device.type == "cuda"
+            and isinstance(self.backend, FlashInferBackend)
+        ):
+            return
+        from inferneo.executor.cuda_graph import CUDAGraphDecodeRunner
+
+        self.graph_runner = CUDAGraphDecodeRunner(
+            self.model,
+            self.kv_caches,
+            num_heads=self.backend.num_heads,
+            num_kv_heads=self.backend.num_kv_heads,
+            head_dim=self.backend.head_dim,
+            block_size=self.config.cache.block_size,
+            max_blocks_per_seq=-(-self.max_model_len // self.config.cache.block_size),
+            scratch_block_id=self._scratch_block_id,
+            max_num_seqs=self.config.scheduler.max_num_seqs,
+            device=self.device,
+            dtype=self.dtype,
+        )
 
     @torch.inference_mode()
     def execute(self, scheduler_output: SchedulerOutput) -> ModelRunnerOutput:
@@ -156,24 +190,36 @@ class TorchModelRunner:
             seq_lens.append(s.start_pos + s.num_new_tokens)
             block_tables.append(s.block_ids)
 
-        metadata = self.backend.build_metadata(query_lens, seq_lens, block_tables)
-        input_t = torch.tensor(input_ids, dtype=torch.long, device=self.device)
-        pos_t = torch.tensor(positions, dtype=torch.long, device=self.device)
-        hidden = self.model(input_t, pos_t, self.kv_caches, metadata)
+        # Fast path: a pure-decode step (every request advances one token and
+        # samples) can replay a captured CUDA graph instead of an eager forward.
+        pure_decode = all(s.do_sample and s.num_new_tokens == 1 for s in scheduled)
+        if (
+            pure_decode
+            and self.graph_runner is not None
+            and self.graph_runner.pick_bucket(len(scheduled)) is not None
+        ):
+            logits = self.graph_runner.run(input_ids, positions, seq_lens, block_tables)
+            sample_ids = [s.request_id for s in scheduled]
+            sample_states = [self._states[rid] for rid in sample_ids]
+        else:
+            metadata = self.backend.build_metadata(query_lens, seq_lens, block_tables)
+            input_t = torch.tensor(input_ids, dtype=torch.long, device=self.device)
+            pos_t = torch.tensor(positions, dtype=torch.long, device=self.device)
+            hidden = self.model(input_t, pos_t, self.kv_caches, metadata)
 
-        row_ends = list(accumulate(query_lens))
-        rows, sample_ids, sample_states = [], [], []
-        for s, end in zip(scheduled, row_ends):
-            if s.do_sample:
-                rows.append(end - 1)
-                sample_ids.append(s.request_id)
-                sample_states.append(self._states[s.request_id])
-        if not rows:
-            return ModelRunnerOutput()
+            row_ends = list(accumulate(query_lens))
+            rows, sample_ids, sample_states = [], [], []
+            for s, end in zip(scheduled, row_ends):
+                if s.do_sample:
+                    rows.append(end - 1)
+                    sample_ids.append(s.request_id)
+                    sample_states.append(self._states[s.request_id])
+            if not rows:
+                return ModelRunnerOutput()
+            logits = self.model.compute_logits(
+                hidden[torch.tensor(rows, dtype=torch.long, device=self.device)]
+            )
 
-        logits = self.model.compute_logits(
-            hidden[torch.tensor(rows, dtype=torch.long, device=self.device)]
-        )
         tokens, logprobs = self.sampler.sample(logits, sample_states)
 
         out = ModelRunnerOutput()

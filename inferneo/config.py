@@ -50,6 +50,7 @@ class EngineConfig:
     scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
     device: str = "auto"  # "auto" | "cuda" | "mps" | "cpu"
     seed: int | None = None  # engine-level RNG seed for unseeded sampling
+    enable_cuda_graph: bool = True  # graph-capture pure-decode steps on CUDA
 
     def __post_init__(self) -> None:
         if self.cache.block_size <= 0:
