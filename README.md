@@ -134,20 +134,17 @@ The step loop: `schedule() → execute() → update() → stream outputs`.
 
 Honest measurement only — same GPU, same model, same dtype, warmed, with vLLM shown alongside.
 
-**Offline throughput** — TinyLlama-1.1B · H100 NVL · fp16 · 200 ragged (64–256 token) requests:
+**Offline throughput vs vLLM 0.24.0** — H100 NVL · fp16 · 200 ragged (64–256 token) requests:
 
-| Engine | tok/s | vs vLLM |
-|---|---:|---:|
-| vLLM 0.24.0 (CUDA graphs) | 47,094 | 1.00× |
-| **inferneo** (FlashInfer + CUDA graphs) | **17,640** | 0.37× |
-| inferneo (FlashInfer, eager) | 7,671 | 0.16× |
-| inferneo padded baseline | 1,498 | 0.03× |
-| inferneo SDPA reference | 389 | 0.008× |
+| Model | inferneo | vLLM | ratio |
+|---|---:|---:|---:|
+| **Mistral-7B-Instruct-v0.2** | **8,216 tok/s** | 13,222 tok/s | **0.62×** |
+| TinyLlama-1.1B | 18,900 tok/s | 47,094 tok/s | 0.40× |
 
-Inferneo is correct and, with CUDA graphs, ~2.7× behind vLLM (a 2.3× jump over its own eager
-path). The remaining gap is per-step **host** overhead — Python scheduling and FlashInfer
-`plan()` each step — not the GPU work. Full methodology and breakdown:
-[benchmarks/README.md](benchmarks/README.md).
+On a real 7B model inferneo reaches **0.62× of vLLM** — the tiny model is the worst case
+(fixed per-step overhead dominates; decode is latency-bound). The remaining gap is host
+overhead and kernel fusion, not correctness. Full methodology and the serving-latency
+(TTFT/TPOT) + prefix-caching numbers: [benchmarks/README.md](benchmarks/README.md).
 
 ## Correctness
 

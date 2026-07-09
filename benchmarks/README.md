@@ -15,6 +15,21 @@ stays in.
 
 ## Results
 
+### Offline throughput vs vLLM — the ratio improves with model size
+
+Same H100, same dtype, same 200-request ragged workload, both engines warmed:
+
+| Model | inferneo tok/s | vLLM 0.24.0 tok/s | ratio |
+|---|---:|---:|---:|
+| **Mistral-7B-Instruct-v0.2** | **8,216** | **13,222** | **0.62×** |
+| TinyLlama-1.1B | 18,900 | 47,094 | 0.40× |
+
+The tiny model is our *worst* case: it is so small that our fixed per-step Python
+overhead dominates and decode is latency-bound (the GPU idles between kernels). On
+a real 7B model the GPU is actually busy, so that overhead shrinks in relative
+terms and inferneo reaches **0.62× of vLLM** — for a ~2,000-line readable engine
+against years of vLLM optimization. Larger models should close the gap further.
+
 ### Offline throughput — TinyLlama-1.1B, H100 NVL (96GB), fp16, 200 requests, ragged 64–256 output tokens
 
 | Engine | tok/s | Relative |
