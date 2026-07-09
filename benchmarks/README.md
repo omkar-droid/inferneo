@@ -107,6 +107,28 @@ Baseline (TinyLlama-1.1B, H100, fp16, 200 req @ 30 req/s, short prompts):
 | TTFT | 15.8 ms | 26.5 ms |
 | TPOT | 4.03 ms | 5.26 ms |
 
+### Serving latency vs vLLM — measured over HTTP (the honest scorecard)
+
+Same client load generator (`openai_load.py`, poisson arrivals) pointed at each
+engine's OpenAI server in turn. TinyLlama-1.1B, H100, 200 req @ 30 req/s:
+
+| metric | inferneo | vLLM 0.24.0 | vLLM better by |
+|---|---:|---:|---:|
+| TTFT p50 | 44.4 ms | 12.4 ms | 3.6× |
+| TPOT p50 | 8.1 ms | 1.67 ms | 4.9× |
+| throughput | 3,809 tok/s | 4,164 tok/s | 1.1× |
+
+**vLLM is ahead on every serving metric, including TTFT** — worth stating plainly.
+The gap is two separate things:
+
+1. **Engine** — our raw decode TPOT (~4 ms) is already ~2.7× vLLM's (~1.5 ms):
+   kernel fusion + scheduling overlap.
+2. **Server** — our OpenAI server adds ~2× more TPOT on top of the engine, where
+   vLLM's server adds almost nothing. Fixing the incremental detokenizer alone
+   (it re-decoded the whole sequence every token, O(n²) → O(n)) cut server TPOT
+   ~25% (10.9 → 8.1 ms); the rest (pydantic serialization, per-request async
+   hops) is the next target.
+
 ### Prefix caching — TTFT with a shared prompt
 
 The headline use case: a long shared prefix (system prompt, few-shot examples)
