@@ -66,6 +66,7 @@ async def main_async(args):
     engine = AsyncEngine.from_model(
         args.model, dtype="float16", max_num_seqs=args.max_num_seqs,
         max_num_batched_tokens=args.max_num_batched_tokens,
+        long_prefill_token_threshold=args.chunked_prefill,
         enable_prefix_caching=args.prefix_caching,
         gpu_memory_utilization=0.85,
     )
@@ -127,6 +128,8 @@ def main():
     ap.add_argument("--rate", type=float, default=25.0, help="poisson arrival rate (req/s)")
     ap.add_argument("--shared-prefix", type=int, default=0, help="shared prefix length (tokens)")
     ap.add_argument("--prefix-caching", action="store_true")
+    ap.add_argument("--chunked-prefill", type=int, default=0,
+                    help="max prompt tokens per step (0 = unchunked)")
     ap.add_argument("--max-num-seqs", type=int, default=256)
     ap.add_argument("--max-num-batched-tokens", type=int, default=8192)
     args = ap.parse_args()

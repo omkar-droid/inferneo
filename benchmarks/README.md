@@ -107,6 +107,18 @@ cache hits. 1500-token shared prefix, 160 req @ 25 req/s:
 The longer the shared prefix (and the larger the model), the bigger the win —
 prefill cost that used to repeat per request is paid once.
 
+### Chunked prefill — an honest null result here
+
+Chunked prefill (`--chunked-prefill N`, i.e. `long_prefill_token_threshold`)
+caps prompt tokens per step so a long prefill doesn't stall concurrent decodes,
+trading a little TTFT for smoother TPOT. On this setup it **did not help** — with
+a 1500-token shared prefix at 35 req/s, chunking to 512 left TPOT unchanged and
+raised TTFT. The reason is honest and expected: on a 1.1B model an H100 prefills
+1500 tokens in ~2–3 ms, so prefill barely disrupts decode and there is nothing to
+smooth — chunking only adds overhead. The win shows up on **large models**, where
+a long prefill costs 100+ ms and genuinely stalls decoders. The knob is there for
+that regime; off is the right default here.
+
 ## Reproduce
 
 ```bash
