@@ -104,6 +104,12 @@ class FlashInferBackend(AttentionBackend):
             attend=self._wrapper.run,
         )
 
+    # Opaque to torch.compile: this both mutates the (multi-GB) KV cache in
+    # place and calls FlashInfer's C++ op — neither is traceable, and tracing
+    # the KV write makes inductor clone the whole cache. Disabling it turns each
+    # attention into a graph break, so the compiler fuses the pointwise regions
+    # around it (RMSNorm/RoPE/SiLU/residuals) without ever seeing the KV cache.
+    @torch.compiler.disable
     def forward(
         self,
         q: torch.Tensor,
