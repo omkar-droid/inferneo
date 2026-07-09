@@ -54,6 +54,8 @@ def load_model(
     state: dict[str, torch.Tensor] = {}
     for f in _weight_files(model_config):
         state.update(load_file(f))
+    if hasattr(model, "fuse_state_dict"):
+        state = model.fuse_state_dict(state)
     missing, unexpected = model.load_state_dict(state, strict=False)
 
     tied = getattr(hf_config, "tie_word_embeddings", False)
