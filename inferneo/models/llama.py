@@ -25,34 +25,38 @@ class LlamaAttention(nn.Module):
         self.head_dim = getattr(config, "head_dim", None) or hidden // self.num_heads
         bias = getattr(config, "attention_bias", False)
 
-        self.q_proj = nn.Linear(hidden, self.num_heads * self.head_dim, bias=bias)
-        self.k_proj = nn.Linear(hidden, self.num_kv_heads * self.head_dim, bias=bias)
-        self.v_proj = nn.Linear(hidden, self.num_kv_heads * self.head_dim, bias=bias)
-        self.o_proj = nn.Linear(self.num_heads * self.head_dim, hidden, bias=bias)
+        self.q_size = self.num_heads * self.head_dim
+        self.kv_size = self.num_kv_heads * self.head_dim
+        # Fused QKV: one GEMM instead of three cuts kernel count in the
+        # latency-bound decode path. Split back after the projection.
+        self.qkv_proj = nn.Linear(hidden, self.q_size + 2 * self.kv_size, bias=bias)
+        self.o_proj = nn.Linear(self.q_size, hidden, bias=bias)
         self.backend = backend
 
     def forward(self, x, positions, rotary, kv_cache, attn_metadata):
         t = x.shape[0]
-        q = self.q_proj(x).view(t, self.num_heads, self.head_dim)
-        k = self.k_proj(x).view(t, self.num_kv_heads, self.head_dim)
-        v = self.v_proj(x).view(t, self.num_kv_heads, self.head_dim)
+        q, k, v = self.qkv_proj(x).split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        q = q.view(t, self.num_heads, self.head_dim)
+        k = k.view(t, self.num_kv_heads, self.head_dim)
+        v = v.view(t, self.num_kv_heads, self.head_dim)
         q, k = rotary(positions, q, k)
         out = self.backend.forward(q, k, v, kv_cache, attn_metadata)
-        return self.o_proj(out.reshape(t, self.num_heads * self.head_dim))
+        return self.o_proj(out.reshape(t, self.q_size))
 
 
 class LlamaMLP(nn.Module):
     def __init__(self, config):
         super().__init__()
-        hidden, inner = config.hidden_size, config.intermediate_size
+        hidden, self.inner = config.hidden_size, config.intermediate_size
         bias = getattr(config, "mlp_bias", False)
-        self.gate_proj = nn.Linear(hidden, inner, bias=bias)
-        self.up_proj = nn.Linear(hidden, inner, bias=bias)
-        self.down_proj = nn.Linear(inner, hidden, bias=bias)
+        # Fused gate+up: one GEMM instead of two.
+        self.gate_up_proj = nn.Linear(hidden, 2 * self.inner, bias=bias)
+        self.down_proj = nn.Linear(self.inner, hidden, bias=bias)
         self.act_fn = nn.SiLU()
 
     def forward(self, x):
-        return self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+        gate, up = self.gate_up_proj(x).split(self.inner, dim=-1)
+        return self.down_proj(self.act_fn(gate) * up)
 
 
 class LlamaDecoderLayer(nn.Module):
@@ -107,3 +111,30 @@ class LlamaForCausalLM(nn.Module):
 
     def tie_weights(self) -> None:
         self.lm_head.weight = self.model.embed_tokens.weight
+
+    @staticmethod
+    def fuse_state_dict(state: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+        """Merge HF's separate q/k/v and gate/up weights into the fused layers.
+
+        Concatenation is along the output-feature axis, so the fused GEMM is
+        numerically identical to the three (resp. two) separate ones.
+        """
+        merged = dict(state)
+        for suffix in ("weight", "bias"):
+            _merge(merged, ["q_proj", "k_proj", "v_proj"], "qkv_proj", suffix)
+            _merge(merged, ["gate_proj", "up_proj"], "gate_up_proj", suffix)
+        return merged
+
+
+def _merge(state, parts, fused, suffix):
+    """For every layer prefix that has `{prefix}{parts[0]}.{suffix}`, concat all
+    `parts` into `{prefix}{fused}.{suffix}` and drop the originals."""
+    tail = f"{parts[0]}.{suffix}"  # e.g. q_proj.weight
+    for key in [k for k in state if k.endswith(tail)]:
+        prefix = key[: -len(tail)]  # up to self_attn./mlp.
+        part_keys = [f"{prefix}{p}.{suffix}" for p in parts]
+        if not all(pk in state for pk in part_keys):
+            continue
+        state[f"{prefix}{fused}.{suffix}"] = torch.cat([state[pk] for pk in part_keys], dim=0)
+        for pk in part_keys:
+            del state[pk]
