@@ -77,9 +77,43 @@ throughput is unchanged). Toggle with `enable_torch_compile=False`.
 The point of inferneo is that closing each of these is a small, isolated change
 against a readable engine — not a fork of a production system.
 
+## Serving latency — TTFT and TPOT
+
+`serve_benchmark.py` drives the async engine under poisson arrivals and reports
+the client-observed latencies that actually matter for serving:
+
+- **TTFT** (time to first token) — arrival → first token; **prefill-bound**.
+- **TPOT / ITL** (time per output token) — the steady-state decode latency.
+
+Baseline (TinyLlama-1.1B, H100, fp16, 200 req @ 30 req/s, short prompts):
+
+| metric | p50 | p99 |
+|---|---:|---:|
+| TTFT | 15.8 ms | 26.5 ms |
+| TPOT | 4.03 ms | 5.26 ms |
+
+### Prefix caching — TTFT with a shared prompt
+
+The headline use case: a long shared prefix (system prompt, few-shot examples)
+that every request repeats. Hash-chain prefix caching skips re-prefilling it on
+cache hits. 1500-token shared prefix, 160 req @ 25 req/s:
+
+| | TTFT p50 | TTFT p99 |
+|---|---:|---:|
+| prefix caching **off** | 50.5 ms | 140.9 ms |
+| prefix caching **on** | **18.2 ms** | **32.5 ms** |
+| | **−64%** | **−77%** |
+
+The longer the shared prefix (and the larger the model), the bigger the win —
+prefill cost that used to repeat per request is paid once.
+
 ## Reproduce
 
 ```bash
-# inferneo (in the inferneo venv)
+# offline throughput
 python benchmarks/offline_throughput.py --model TinyLlama/TinyLlama-1.1B-Chat-v1.0 --device cuda
+
+# serving TTFT/TPOT, and the prefix-caching effect
+python benchmarks/serve_benchmark.py --requests 200 --rate 30
+python benchmarks/serve_benchmark.py --requests 160 --rate 25 --shared-prefix 1500 --prefix-caching
 ```
