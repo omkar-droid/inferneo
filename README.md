@@ -36,6 +36,8 @@ each request, and prefill / decode / chunked-prefill all fall out of that automa
 - **Fully on-GPU batched sampler**: temperature, top-k / top-p / min-p, presence / frequency /
   repetition penalties, seeds, and logprobs — one device pass, no CPU round-trip.
 - **CUDA graphs** on the decode step — captured per batch-size bucket, ~2.3× faster decode.
+- **torch.compile** fuses the decode forward's pointwise ops (small buckets only) — ~37% lower
+  single-stream latency, captured inside the CUDA graph.
 - **OpenAI-compatible server**: `/v1/completions` and `/v1/chat/completions` with SSE streaming.
 - **Torch-free control plane** — the scheduler and KV manager import without torch, so they
   run in CPU CI and stay hackable and backend-portable.

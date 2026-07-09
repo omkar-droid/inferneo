@@ -51,6 +51,7 @@ class EngineConfig:
     device: str = "auto"  # "auto" | "cuda" | "mps" | "cpu"
     seed: int | None = None  # engine-level RNG seed for unseeded sampling
     enable_cuda_graph: bool = True  # graph-capture pure-decode steps on CUDA
+    enable_torch_compile: bool = True  # fuse the decode forward with torch.compile
 
     def __post_init__(self) -> None:
         if self.cache.block_size <= 0:

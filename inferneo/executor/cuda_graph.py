@@ -56,11 +56,25 @@ class CUDAGraphDecodeRunner:
         max_num_seqs: int,
         device: torch.device,
         dtype: torch.dtype,
+        compile_forward: bool = False,
     ):
         import flashinfer
 
         self._flashinfer = flashinfer
         self.model = model
+        # torch.compile fuses the pointwise ops (RMSNorm, RoPE, SiLU, residual
+        # adds) into far fewer kernels — a big win where decode is latency-bound
+        # (small batches), but a slight loss at large batch where the GEMMs are
+        # compute/bandwidth-bound and cuBLAS already wins. So we compile only the
+        # small buckets and keep the eager (cuBLAS) forward for large ones.
+        # FlashInfer attention is opaque to the compiler (a graph break), and the
+        # fused kernels are captured in our CUDA graph below.
+        self._plain_transformer = model.model
+        self._compiled_transformer = (
+            torch.compile(model.model, mode="default", dynamic=False, fullgraph=False)
+            if compile_forward
+            else model.model
+        )
         self.kv_caches = kv_caches
         self.num_heads = num_heads
         self.num_kv_heads = num_kv_heads
@@ -73,6 +87,8 @@ class CUDAGraphDecodeRunner:
 
         self.buckets = default_buckets(max_num_seqs)
         self.max_bs = self.buckets[-1]
+        # Compile pays off only below this batch size (measured crossover).
+        self._compile_max_bs = 64
 
         # Static input buffers (max-sized; sliced per bucket).
         self.g_input_ids = torch.zeros(self.max_bs, dtype=torch.long, device=device)
@@ -151,7 +167,10 @@ class CUDAGraphDecodeRunner:
         )
 
     def _forward(self, b: int, meta: FlashInferMetadata) -> torch.Tensor:
-        hidden = self.model(self.g_input_ids[:b], self.g_positions[:b], self.kv_caches, meta)
+        transformer = (
+            self._compiled_transformer if b <= self._compile_max_bs else self._plain_transformer
+        )
+        hidden = transformer(self.g_input_ids[:b], self.g_positions[:b], self.kv_caches, meta)
         return self.model.compute_logits(hidden)
 
     def _capture(self, b: int) -> _Bucket:
@@ -164,7 +183,11 @@ class CUDAGraphDecodeRunner:
         self._plan(bucket, b, [], [])  # all-padding plan
         meta = self._decode_metadata(b, bucket)
 
-        # Warm up on a side stream (required before capture).
+        # Trigger torch.compile (and any lazy init) on the default stream first,
+        # so autotuning/allocation doesn't happen mid-capture.
+        for _ in range(3):
+            self._forward(b, meta)
+        # Then the side-stream warmup required by the CUDA-graph capture protocol.
         stream = torch.cuda.Stream()
         stream.wait_stream(torch.cuda.current_stream())
         with torch.cuda.stream(stream):

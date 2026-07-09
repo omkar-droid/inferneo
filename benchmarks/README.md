@@ -55,6 +55,25 @@ default for chat and creative generation, this was the difference between usable
 and unusable at scale. (Greedy throughput is unchanged — it already used an
 on-GPU argmax fast path.)
 
+### Single-stream latency — same model/GPU, greedy, 128 tokens
+
+| Decode forward | tok/s | ms/token |
+|---|---:|---:|
+| **torch.compile (fused pointwise)** | **425** | **2.35** |
+| eager (cuBLAS + separate pointwise kernels) | 267 | 3.74 |
+
+Profiling showed the decode forward is *kernel-latency bound* — even at batch 1
+it took 3.3 ms, dominated by executing hundreds of tiny sequential kernels.
+`torch.compile` fuses the pointwise ops (RMSNorm, RoPE, SiLU, residual adds) into
+far fewer kernels; the fused kernels are then captured in the same CUDA graph.
+At low concurrency this cuts per-token latency ~37% (**+59% tok/s**).
+
+The catch: at *large* batch the forward becomes compute/bandwidth-bound, where
+cuBLAS already wins and the compiled kernels are slightly slower. So inferneo
+compiles only the small batch-size buckets (≤ 64) and keeps the eager cuBLAS
+forward for large ones — a latency win with no throughput cost (batch-256
+throughput is unchanged). Toggle with `enable_torch_compile=False`.
+
 The point of inferneo is that closing each of these is a small, isolated change
 against a readable engine — not a fork of a production system.
 

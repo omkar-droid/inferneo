@@ -150,6 +150,7 @@ class TorchModelRunner:
             max_num_seqs=self.config.scheduler.max_num_seqs,
             device=self.device,
             dtype=self.dtype,
+            compile_forward=self.config.enable_torch_compile,
         )
 
     @torch.inference_mode()
