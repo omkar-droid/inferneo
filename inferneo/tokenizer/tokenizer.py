@@ -53,25 +53,36 @@ class IncrementalDetokenizer:
     """Turns a growing token-id stream into text deltas.
 
     Decoding token-by-token is wrong (many tokens are sub-word or multi-byte
-    fragments). This keeps a small window of recent tokens and emits the newly
-    stable text, holding back a trailing fragment that isn't valid UTF-8 yet
-    (a partial multi-byte character) until the next token completes it.
+    fragments), but re-decoding the whole sequence every step is O(n^2). This
+    uses the prefix/read-offset window (as in vLLM/HF): each step decodes only a
+    couple of trailing tokens — the token(s) just added plus one of context for
+    correct spacing — and emits the newly stable suffix, holding back an
+    incomplete trailing UTF-8 char (U+FFFD) until the next token completes it.
     """
 
     def __init__(self, tokenizer):
         self._tok = tokenizer
         self._tokens: list[int] = []
         self._text = ""
+        self._prefix_offset = 0
+        self._read_offset = 0
 
     def decode(self, all_token_ids: list[int]) -> str:
         """Feed the full output-token list so far; return the new text delta."""
         self._tokens = all_token_ids
-        full = self._tok.decode(all_token_ids, skip_special_tokens=True)
-        # Hold back an incomplete trailing UTF-8 char (shows as U+FFFD).
-        if full.endswith("�"):
-            return ""
-        delta = full[len(self._text) :]
-        self._text = full
+        prefix = self._tok.decode(
+            all_token_ids[self._prefix_offset : self._read_offset],
+            skip_special_tokens=True,
+        )
+        whole = self._tok.decode(
+            all_token_ids[self._prefix_offset :], skip_special_tokens=True
+        )
+        if len(whole) <= len(prefix) or whole.endswith("�"):
+            return ""  # nothing new yet, or a partial multi-byte char
+        delta = whole[len(prefix) :]
+        self._prefix_offset = self._read_offset
+        self._read_offset = len(all_token_ids)
+        self._text += delta
         return delta
 
     @property
