@@ -132,6 +132,7 @@ def build_engine_config(
     enable_prefix_caching: bool = False,
     max_num_seqs: int = 64,
     max_num_batched_tokens: int = 2048,
+    long_prefill_token_threshold: int = 0,
     seed: int | None = None,
     enable_cuda_graph: bool = True,
     enable_torch_compile: bool = True,
@@ -157,6 +158,7 @@ def build_engine_config(
         scheduler=SchedulerConfig(
             max_num_seqs=max_num_seqs,
             max_num_batched_tokens=max_num_batched_tokens,
+            long_prefill_token_threshold=long_prefill_token_threshold,
         ),
         device=device,
         seed=seed,
