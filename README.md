@@ -33,8 +33,8 @@ each request, and prefill / decode / chunked-prefill all fall out of that automa
 - **Pluggable attention backends**: a pure-torch SDPA reference that runs on **CPU / MPS / CUDA**,
   and a **FlashInfer** fast path auto-selected on CUDA.
 - **Hash-chain prefix caching** for shared prompts (opt-in).
-- **Full sampler**: temperature, top-k / top-p / min-p, presence / frequency / repetition
-  penalties, seeds, and logprobs.
+- **Fully on-GPU batched sampler**: temperature, top-k / top-p / min-p, presence / frequency /
+  repetition penalties, seeds, and logprobs — one device pass, no CPU round-trip.
 - **CUDA graphs** on the decode step — captured per batch-size bucket, ~2.3× faster decode.
 - **OpenAI-compatible server**: `/v1/completions` and `/v1/chat/completions` with SSE streaming.
 - **Torch-free control plane** — the scheduler and KV manager import without torch, so they

@@ -40,6 +40,21 @@ of per-step kernel launches into one replay, closing the gap to vLLM from ~6× t
 CUDA graphs cover *pure-decode* steps (every request advances one token); prefill
 and mixed steps run eager. Toggle with `enable_cuda_graph=False`.
 
+### Sampling throughput — same setup, temperature 0.8 + top-p 0.95
+
+| Sampler | tok/s |
+|---|---:|
+| **on-GPU batched (current)** | **13,694** |
+| per-request CPU loop (previous) | 342 |
+
+The old sampler brought the full `[batch, vocab]` logits to the CPU and looped
+over requests in Python — **40× slower** on a sampling workload than the batched
+on-GPU sampler, which does temperature / top-k / top-p / penalties and a
+Gumbel-max draw entirely on device with one sync. Since `temperature > 0` is the
+default for chat and creative generation, this was the difference between usable
+and unusable at scale. (Greedy throughput is unchanged — it already used an
+on-GPU argmax fast path.)
+
 The point of inferneo is that closing each of these is a small, isolated change
 against a readable engine — not a fork of a production system.
 
