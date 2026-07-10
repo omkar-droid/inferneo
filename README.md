@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="docs/social-card.png" alt="inferneo — a from-scratch LLM inference engine" width="760">
+
 # 🔥 Inferneo
 
 **A small, readable, paged-KV LLM inference engine — in the spirit of vLLM and SGLang.**
