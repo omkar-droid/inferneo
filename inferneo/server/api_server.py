@@ -12,7 +12,7 @@ import time
 import uuid
 from collections.abc import AsyncIterator
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from inferneo.engine.async_engine import AsyncEngine
@@ -45,6 +45,18 @@ async def _dropped(raw, tick: int) -> bool:
     return tick % _DISCONNECT_CHECK_EVERY == 0 and await raw.is_disconnected()
 
 
+def _check_length(engine: AsyncEngine, prompt_ids: list[int]) -> None:
+    """Reject an over-long prompt here, with a 400, rather than letting the engine
+    raise for it later — by then a streaming response has already begun, and the
+    caller would see a 500 for what is really their mistake."""
+    limit = engine.max_model_len
+    if len(prompt_ids) >= limit:
+        raise HTTPException(
+            status_code=400,
+            detail=f"prompt is {len(prompt_ids)} tokens; max_model_len is {limit}",
+        )
+
+
 def build_app(engine: AsyncEngine) -> FastAPI:
     app = FastAPI(title="inferneo")
 
@@ -72,6 +84,7 @@ def build_app(engine: AsyncEngine) -> FastAPI:
         params = req.to_sampling_params()
         request_id = f"cmpl-{uuid.uuid4().hex}"
         prompt_ids = engine.tokenizer.encode(prompt)
+        _check_length(engine, prompt_ids)
 
         if req.stream:
             return StreamingResponse(
@@ -98,6 +111,7 @@ def build_app(engine: AsyncEngine) -> FastAPI:
             prompt_ids = engine.tokenizer.encode(joined + "\nassistant:")
         params = req.to_sampling_params()
         request_id = f"chatcmpl-{uuid.uuid4().hex}"
+        _check_length(engine, prompt_ids)
 
         if req.stream:
             return StreamingResponse(
