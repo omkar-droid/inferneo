@@ -107,27 +107,37 @@ Baseline (TinyLlama-1.1B, H100, fp16, 200 req @ 30 req/s, short prompts):
 | TTFT | 15.8 ms | 26.5 ms |
 | TPOT | 4.03 ms | 5.26 ms |
 
-### Serving latency vs vLLM — measured over HTTP (the honest scorecard)
+### Serving latency vs vLLM — measured over HTTP
 
 Same client load generator (`openai_load.py`, poisson arrivals) pointed at each
-engine's OpenAI server in turn. TinyLlama-1.1B, H100, 200 req @ 30 req/s:
+engine's OpenAI server in turn. TinyLlama-1.1B, H100.
+
+**Measure latency below saturation.** An earlier version of this table ran both
+engines at 30 req/s — a rate *we* could not sustain (~27 req/s) but vLLM could. At
+that point TTFT/TPOT mostly measure **queueing**, not per-token cost, so the gap
+looked far worse than it is. Re-run at 10 req/s, which **both** engines serve
+comfortably:
 
 | metric | inferneo | vLLM 0.24.0 | vLLM better by |
 |---|---:|---:|---:|
-| TTFT p50 | 44.4 ms | 12.4 ms | 3.6× |
-| TPOT p50 | 8.1 ms | 1.67 ms | 4.9× |
-| throughput | 3,809 tok/s | 4,164 tok/s | 1.1× |
+| TTFT p50 | 24.7 ms | 11.5 ms | **2.1×** |
+| TTFT p99 | 47.2 ms | 15.0 ms | 3.1× |
+| TPOT p50 | 3.26 ms | 1.57 ms | **2.1×** |
+| TPOT p99 | 4.28 ms | 1.68 ms | 2.5× |
 
-**vLLM is ahead on every serving metric, including TTFT** — worth stating plainly.
-The gap is two separate things:
+**vLLM is ahead on serving latency by ~2×** — real, but half what the saturated
+measurement suggested (it claimed 3.6×/4.9×). The lesson is a benchmarking one:
+*latency measured at or above capacity is dominated by queueing.*
 
-1. **Engine** — our raw decode TPOT (~4 ms) is already ~2.7× vLLM's (~1.5 ms):
-   kernel fusion + scheduling overlap.
-2. **Server** — our OpenAI server adds ~2× more TPOT on top of the engine, where
-   vLLM's server adds almost nothing. Fixing the incremental detokenizer alone
-   (it re-decoded the whole sequence every token, O(n²) → O(n)) cut server TPOT
-   ~25% (10.9 → 8.1 ms); the rest (pydantic serialization, per-request async
-   hops) is the next target.
+Most of the remaining gap is the **engine** (our decode step is slower — kernel
+fusion + scheduling overlap), not the server. Two server fixes so far:
+
+- **Incremental detokenizer** re-decoded the whole sequence every token (O(n²) → O(n)).
+- **Client-disconnect check** ran on *every* token; each call is an extra event-loop
+  hop (Starlette spins up an anyio cancel scope), which at ~25 concurrent streams cost
+  real milliseconds. Sampling it every 16 tokens (a dropped client is still caught when
+  the generator closes) gives **−10% TPOT** (3.64 → 3.26 ms) and **+11% throughput**
+  under saturation (4,078 → 4,532 tok/s).
 
 ### Prefix caching — TTFT with a shared prompt
 
