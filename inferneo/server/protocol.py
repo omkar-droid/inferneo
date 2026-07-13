@@ -5,7 +5,7 @@ from __future__ import annotations
 import time
 import uuid
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from inferneo.sampling_params import SamplingParams
 
@@ -15,19 +15,31 @@ def _rid(prefix: str) -> str:
 
 
 class _SamplingFields(BaseModel):
-    max_tokens: int | None = 128
-    temperature: float = 1.0
-    top_p: float = 1.0
-    top_k: int = -1
-    min_p: float = 0.0
-    presence_penalty: float = 0.0
-    frequency_penalty: float = 0.0
-    repetition_penalty: float = 1.0
+    """Ranges are declared here, not just in SamplingParams, so FastAPI rejects a
+    bad value at the HTTP boundary with a 422 telling the caller what's wrong —
+    rather than letting SamplingParams raise ValueError inside the handler, which
+    surfaces as a 500 ("our server broke") for what is really a client mistake."""
+
+    max_tokens: int | None = Field(128, ge=1)
+    temperature: float = Field(1.0, ge=0)
+    top_p: float = Field(1.0, gt=0, le=1)
+    top_k: int = Field(-1, ge=-1)  # -1 disables; 0 is rejected below
+    min_p: float = Field(0.0, ge=0, le=1)
+    presence_penalty: float = Field(0.0, ge=-2, le=2)
+    frequency_penalty: float = Field(0.0, ge=-2, le=2)
+    repetition_penalty: float = Field(1.0, gt=0)
     seed: int | None = None
     stop: str | list[str] | None = None
     ignore_eos: bool = False
-    logprobs: int | None = None
+    logprobs: int | None = Field(None, ge=0)
     stream: bool = False
+
+    @field_validator("top_k")
+    @classmethod
+    def _top_k_not_zero(cls, v: int) -> int:
+        if v == 0:
+            raise ValueError("top_k must be -1 (disabled) or >= 1")
+        return v
 
     def to_sampling_params(self) -> SamplingParams:
         stop = [self.stop] if isinstance(self.stop, str) else (self.stop or [])

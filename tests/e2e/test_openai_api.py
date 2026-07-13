@@ -87,6 +87,40 @@ def test_chat_streaming(client):
     assert saw_done
 
 
+@pytest.mark.parametrize(
+    "bad,expected",
+    [
+        ({"temperature": "hot"}, 422),   # wrong type
+        ({"temperature": -5}, 422),      # out of range
+        ({"top_p": 9}, 422),
+        ({"top_k": 0}, 422),             # 0 is not a valid top_k (-1 disables)
+        ({"min_p": 2}, 422),
+        ({"max_tokens": 0}, 422),
+        ({"presence_penalty": 9}, 422),
+    ],
+)
+def test_invalid_params_rejected_cleanly(client, bad, expected):
+    """Bad client input must return 4xx with a reason — never a 500, which would
+    tell the caller *our* server broke when in fact their request was wrong."""
+    r = client.post("/v1/completions", json={"model": "t", "prompt": "hi", **bad})
+    assert r.status_code == expected, r.text
+
+
+def test_bad_request_does_not_kill_the_engine(client):
+    """Regression: add_request() used to raise inside the engine thread, which
+    tripped _fail_all() and killed the engine for *every* request. One bad prompt
+    must never take the server down."""
+    long_prompt = "word " * 5000
+    r = client.post("/v1/completions", json={"model": "t", "prompt": long_prompt, "max_tokens": 4})
+    assert r.status_code == 400  # rejected, with a reason
+
+    # the engine must still serve everyone else
+    ok = client.post("/v1/completions", json={"model": "t", "prompt": "hello",
+                                              "max_tokens": 5, "temperature": 0})
+    assert ok.status_code == 200
+    assert ok.json()["choices"][0]["text"]
+
+
 def test_deterministic_matches_offline(client, tiny_model_dir):
     """Greedy over HTTP must equal the offline LLM path token-for-text."""
     from inferneo import LLM, SamplingParams

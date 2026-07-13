@@ -70,7 +70,13 @@ class AsyncEngine:
                 with self._lock:
                     while self._inbox:
                         rid, prompt, params = self._inbox.popleft()
-                        engine.add_request(prompt, params, rid)
+                        try:
+                            engine.add_request(prompt, params, rid)
+                        except Exception as exc:  # noqa: BLE001
+                            # A bad request (e.g. prompt longer than max_model_len)
+                            # must fail only *that* request — never take down the
+                            # engine thread and with it everyone else's requests.
+                            self._dispatch_to(rid, exc)
                     while self._aborts:
                         engine.abort_request(self._aborts.popleft())
                 if not engine.has_unfinished():
@@ -82,7 +88,10 @@ class AsyncEngine:
             self._fail_all(exc)
 
     def _dispatch(self, item) -> None:
-        queue = self._queues.get(getattr(item, "request_id", None))
+        self._dispatch_to(getattr(item, "request_id", None), item)
+
+    def _dispatch_to(self, request_id: str | None, item) -> None:
+        queue = self._queues.get(request_id)
         if queue is not None and self._loop is not None:
             self._loop.call_soon_threadsafe(queue.put_nowait, item)
 
@@ -94,7 +103,9 @@ class AsyncEngine:
         if self._loop is None:
             return
         for queue in list(self._queues.values()):
-            self._loop.call_soon_threadsafe(queue.put_nowait, exc)
+            crash = RuntimeError("inferneo engine thread crashed")
+            crash.__cause__ = exc
+            self._loop.call_soon_threadsafe(queue.put_nowait, crash)
 
     # ------------------------------------------------------------------ #
     # EngineClient surface
@@ -121,7 +132,7 @@ class AsyncEngine:
             while True:
                 item = await queue.get()
                 if isinstance(item, BaseException):
-                    raise RuntimeError("inferneo engine thread crashed") from item
+                    raise item  # a bad-request error, or the engine-crash RuntimeError
                 yield item
                 if item.finished:
                     return
