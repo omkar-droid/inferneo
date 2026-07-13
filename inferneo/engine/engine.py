@@ -10,6 +10,7 @@ from __future__ import annotations
 import uuid
 
 from inferneo.config import EngineConfig, ModelConfig
+from inferneo.engine import trace
 from inferneo.engine.request import EngineRequest
 from inferneo.engine.scheduler import Scheduler
 from inferneo.kv.block_manager import KVCacheManager
@@ -39,6 +40,7 @@ class InferneoEngine:
             enable_caching=config.cache.enable_prefix_caching,
         )
         self.scheduler = Scheduler(config.scheduler, kv, self.max_model_len)
+        self._step_count = 0
 
     @classmethod
     def from_model(cls, model: str, **kwargs) -> InferneoEngine:
@@ -85,6 +87,8 @@ class InferneoEngine:
         scheduler_output = self.scheduler.schedule()
         if not scheduler_output.scheduled and not scheduler_output.finished_ids:
             return []
+        self._step_count += 1
+        trace.step(self._step_count, scheduler_output, self.scheduler)
         runner_output = self.runner.execute(scheduler_output)
         updated = self.scheduler.update_from_output(scheduler_output, runner_output)
 
