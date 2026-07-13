@@ -32,6 +32,9 @@ each request, and prefill / decode / chunked-prefill all fall out of that automa
 - **Paged KV cache + continuous batching** with chunked prefill and preemption under memory pressure.
 - **Unified token-budget scheduler** (vLLM-V1 style) — no prefill/decode phase split.
 - **Own Llama-family model** (Llama 2/3, TinyLlama, Mistral) loading HuggingFace safetensors directly.
+- **Multimodal**: LLaVA vision support — a CLIP tower + projector produce image embeddings that are
+  spliced into the token sequence, so the paged KV cache, scheduler and CUDA graphs treat an image
+  as just rows in the sequence. OpenAI multimodal message content is accepted as-is.
 - **Pluggable attention backends**: a pure-torch SDPA reference that runs on **CPU / MPS / CUDA**,
   and a **FlashInfer** fast path auto-selected on CUDA.
 - **Hash-chain prefix caching** for shared prompts (opt-in).

@@ -16,7 +16,7 @@ import torch
 from inferneo.attention.selector import get_attention_backend
 from inferneo.config import EngineConfig
 from inferneo.engine.interfaces import ModelRunnerOutput, SchedulerOutput
-from inferneo.models.loader import load_hf_config, load_model
+from inferneo.models.loader import is_multimodal, load_hf_config, load_model, text_config
 from inferneo.sampling.sampler import RequestSamplerState, Sampler
 
 # Tokens of KV capacity to allocate by default on cpu/mps, where there is no
@@ -67,22 +67,58 @@ class TorchModelRunner:
         self.device = resolve_device(config.device)
         self.dtype = resolve_dtype(config.model.dtype, self.device)
         self._states: dict[str, RequestSamplerState] = {}
+        # Prompt embeddings for multimodal requests, keyed by request id. These are
+        # GPU tensors, so they live here rather than in SchedulerOutput — the
+        # control plane stays torch-free and serializable.
+        self._prompt_embeds: dict[str, torch.Tensor] = {}
         self.kv_caches: list[torch.Tensor] = []
         self.graph_runner = None
+
+    def set_prompt_embeds(self, request_id: str, embeds: torch.Tensor) -> None:
+        self._prompt_embeds[request_id] = embeds.to(self.device, self.dtype)
+
+    def _build_embeds(self, scheduled, input_t: torch.Tensor) -> torch.Tensor | None:
+        """Return the batch's inputs_embeds, or None if it's pure text.
+
+        Only requests whose *prompt* carries embeddings (an image) need special
+        handling, and only while they are still prefilling — generated tokens are
+        always text. Chunked prefill works because we slice the rows the chunk
+        covers out of the request's precomputed prompt embeddings.
+        """
+        if not any(s.request_id in self._prompt_embeds for s in scheduled):
+            return None  # pure-text batch — unchanged fast path
+
+        rows, offset = [], 0
+        for s in scheduled:
+            n = s.num_new_tokens
+            embeds = self._prompt_embeds.get(s.request_id)
+            if embeds is not None and s.start_pos < embeds.shape[0]:
+                end = min(s.start_pos + n, embeds.shape[0])
+                chunk = embeds[s.start_pos : end]
+                if chunk.shape[0] < n:  # chunk spills past the prompt into decode
+                    tail = self.model.embed(input_t[offset + chunk.shape[0] : offset + n])
+                    chunk = torch.cat([chunk, tail])
+                rows.append(chunk)
+            else:
+                rows.append(self.model.embed(input_t[offset : offset + n]))
+            offset += n
+        return torch.cat(rows)
 
     def load_model(self) -> None:
         hf_config = load_hf_config(self.config.model)
         self.hf_config = hf_config
+        # A vision-language checkpoint nests the LLM's config; every size below
+        # (heads, layers, KV shape) must come from the *text* model.
+        cfg = text_config(hf_config)
+        self.multimodal = is_multimodal(hf_config)
         limit = self.config.model.max_model_len
         self.max_model_len = min(
-            hf_config.max_position_embeddings, limit or hf_config.max_position_embeddings
+            cfg.max_position_embeddings, limit or cfg.max_position_embeddings
         )
-        num_heads = hf_config.num_attention_heads
-        num_kv_heads = getattr(hf_config, "num_key_value_heads", num_heads)
-        head_dim = getattr(hf_config, "head_dim", None) or (
-            hf_config.hidden_size // num_heads
-        )
-        self._kv_shape = _KVShape(hf_config.num_hidden_layers, num_kv_heads, head_dim)
+        num_heads = cfg.num_attention_heads
+        num_kv_heads = getattr(cfg, "num_key_value_heads", num_heads)
+        head_dim = getattr(cfg, "head_dim", None) or (cfg.hidden_size // num_heads)
+        self._kv_shape = _KVShape(cfg.num_hidden_layers, num_kv_heads, head_dim)
         self.backend = get_attention_backend(
             num_heads=num_heads,
             num_kv_heads=num_kv_heads,
@@ -95,6 +131,13 @@ class TorchModelRunner:
             self.config.model, hf_config, self.backend, self.device, self.dtype
         )
         self.sampler = Sampler(self.config.seed)
+
+        # Eyes, if the checkpoint has them. Text models skip this entirely.
+        self.vision = None
+        if self.multimodal:
+            from inferneo.models.llava import load_vision
+
+            self.vision = load_vision(self.config.model, hf_config, self.device, self.dtype)
 
     def init_kv_cache(self) -> int:
         cache_cfg = self.config.cache
@@ -157,8 +200,11 @@ class TorchModelRunner:
     def execute(self, scheduler_output: SchedulerOutput) -> ModelRunnerOutput:
         for rid in scheduler_output.finished_ids:
             self._states.pop(rid, None)
+            self._prompt_embeds.pop(rid, None)
         for rid in scheduler_output.preempted_ids:
             self._states.pop(rid, None)
+            # keep _prompt_embeds: a preempted request is recomputed from scratch
+            # on resume, so it needs its image embeddings again.
         scheduled = scheduler_output.scheduled
         if not scheduled:
             return ModelRunnerOutput()
@@ -206,7 +252,8 @@ class TorchModelRunner:
             metadata = self.backend.build_metadata(query_lens, seq_lens, block_tables)
             input_t = torch.tensor(input_ids, dtype=torch.long, device=self.device)
             pos_t = torch.tensor(positions, dtype=torch.long, device=self.device)
-            hidden = self.model(input_t, pos_t, self.kv_caches, metadata)
+            embeds = self._build_embeds(scheduled, input_t)
+            hidden = self.model(input_t, pos_t, self.kv_caches, metadata, embeds)
 
             row_ends = list(accumulate(query_lens))
             rows, sample_ids, sample_states = [], [], []

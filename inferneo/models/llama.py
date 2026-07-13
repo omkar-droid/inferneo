@@ -87,8 +87,14 @@ class LlamaModel(nn.Module):
         )
         self.rotary = RotaryEmbedding(head_dim, get_rope_parameters(config))
 
-    def forward(self, input_ids, positions, kv_caches, attn_metadata):
-        x = self.embed_tokens(input_ids)
+    def forward(self, input_ids, positions, kv_caches, attn_metadata, inputs_embeds=None):
+        # `inputs_embeds` lets a caller supply the embedding sequence directly —
+        # the seam multimodal needs, since an image arrives as embeddings from a
+        # vision tower, not as token ids. Everything downstream (paged attention,
+        # KV cache, scheduler) is unchanged: by this point an image is just rows
+        # in the sequence. Decode always uses input_ids, so the CUDA-graph path
+        # is untouched.
+        x = inputs_embeds if inputs_embeds is not None else self.embed_tokens(input_ids)
         for layer, kv_cache in zip(self.layers, kv_caches):
             x = layer(x, positions, self.rotary, kv_cache, attn_metadata)
         return self.norm(x)
@@ -101,10 +107,17 @@ class LlamaForCausalLM(nn.Module):
         self.model = LlamaModel(config, backend)
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
 
-    def forward(self, input_ids, positions, kv_caches, attn_metadata) -> torch.Tensor:
+    def forward(
+        self, input_ids, positions, kv_caches, attn_metadata, inputs_embeds=None
+    ) -> torch.Tensor:
         """Returns hidden states [num_tokens, hidden]; call compute_logits on
         the (few) rows that actually sample — skipping lm_head for the rest."""
-        return self.model(input_ids, positions, kv_caches, attn_metadata)
+        return self.model(input_ids, positions, kv_caches, attn_metadata, inputs_embeds)
+
+    def embed(self, input_ids: torch.Tensor) -> torch.Tensor:
+        """Token ids -> embeddings. Multimodal preprocessing needs this to build a
+        mixed text+image embedding sequence before the forward pass."""
+        return self.model.embed_tokens(input_ids)
 
     def compute_logits(self, hidden: torch.Tensor) -> torch.Tensor:
         return self.lm_head(hidden)

@@ -147,6 +147,12 @@ class AsyncEngine:
             self._aborts.append(request_id)
 
     @property
+    def input_processor(self):
+        """The one place that turns request content (text/image/…) into an
+        EngineInput. Transports use this; AsyncEngine itself stays modality-blind."""
+        return self.engine.input_processor
+
+    @property
     def model_name(self) -> str:
         return self.engine.config.model.model
 

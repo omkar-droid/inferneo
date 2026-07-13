@@ -39,6 +39,35 @@ def _weight_files(model_config: ModelConfig) -> list[Path]:
     return files
 
 
+def is_multimodal(hf_config) -> bool:
+    """A vision-language checkpoint nests the LLM's config under `text_config`."""
+    return hasattr(hf_config, "text_config") and hasattr(hf_config, "vision_config")
+
+
+def text_config(hf_config):
+    return hf_config.text_config if is_multimodal(hf_config) else hf_config
+
+
+def _strip_language_model(state: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    """In a LLaVA checkpoint the Llama weights sit under a `language_model.` prefix
+    (the layout differs across transformers versions). Map them onto the plain
+    Llama names our model expects, and drop the vision/projector weights, which
+    the vision tower loads separately."""
+    out: dict[str, torch.Tensor] = {}
+    for k, v in state.items():
+        if "vision_tower" in k or "multi_modal_projector" in k:
+            continue
+        if k.startswith("model.language_model."):      # newer layout
+            out["model." + k[len("model.language_model.") :]] = v
+        elif k.startswith("language_model.model."):    # older layout
+            out["model." + k[len("language_model.model.") :]] = v
+        elif k.startswith("language_model.lm_head."):
+            out["lm_head." + k[len("language_model.lm_head.") :]] = v
+        else:
+            out[k] = v
+    return out
+
+
 def load_model(
     model_config: ModelConfig,
     hf_config,
@@ -48,12 +77,15 @@ def load_model(
 ) -> torch.nn.Module:
     from safetensors.torch import load_file
 
-    model_cls = get_model_class(getattr(hf_config, "architectures", None))
-    model = model_cls(hf_config, backend).to(dtype)
+    llm_config = text_config(hf_config)
+    model_cls = get_model_class(getattr(llm_config, "architectures", None) or ["LlamaForCausalLM"])
+    model = model_cls(llm_config, backend).to(dtype)
 
     state: dict[str, torch.Tensor] = {}
     for f in _weight_files(model_config):
         state.update(load_file(f))
+    if is_multimodal(hf_config):
+        state = _strip_language_model(state)
     if hasattr(model, "fuse_state_dict"):
         state = model.fuse_state_dict(state)
     missing, unexpected = model.load_state_dict(state, strict=False)

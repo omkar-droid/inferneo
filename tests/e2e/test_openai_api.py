@@ -121,6 +121,33 @@ def test_bad_request_does_not_kill_the_engine(client):
     assert ok.json()["choices"][0]["text"]
 
 
+def test_chat_accepts_multimodal_content_parts(client):
+    """OpenAI's list-of-parts content must be accepted (text parts work on a
+    text model); the shape itself must not be rejected."""
+    r = client.post("/v1/chat/completions", json={
+        "model": "t",
+        "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+        "max_tokens": 4, "temperature": 0,
+    })
+    assert r.status_code == 200, r.text
+    assert r.json()["choices"][0]["message"]["content"] is not None
+
+
+def test_image_on_a_text_model_is_honestly_rejected(client):
+    """A text-only model has no vision tower. It must say so with a 501 — never
+    silently ignore the image and answer as if it had seen it."""
+    r = client.post("/v1/chat/completions", json={
+        "model": "t",
+        "messages": [{"role": "user", "content": [
+            {"type": "text", "text": "what is this?"},
+            {"type": "image_url", "image_url": {"url": "https://example.com/x.png"}},
+        ]}],
+        "max_tokens": 4,
+    })
+    assert r.status_code == 501
+    assert "vision" in r.json()["detail"].lower()
+
+
 def test_deterministic_matches_offline(client, tiny_model_dir):
     """Greedy over HTTP must equal the offline LLM path token-for-text."""
     from inferneo import LLM, SamplingParams
