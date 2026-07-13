@@ -7,6 +7,7 @@ Endpoints: /v1/completions, /v1/chat/completions (both streaming + not),
 
 from __future__ import annotations
 
+import os
 import time
 import uuid
 from collections.abc import AsyncIterator
@@ -32,6 +33,16 @@ from inferneo.server.protocol import (
     ModelList,
     UsageInfo,
 )
+
+# Checking the client connection costs an extra event-loop hop (Starlette spins up
+# an anyio cancel scope), and doing it per token dominated the per-token cost once
+# many streams ran concurrently. Sampling it every N tokens is enough: a client that
+# vanishes is also caught when the generator closes, which aborts the request.
+_DISCONNECT_CHECK_EVERY = int(os.environ.get("INFERNEO_DISCONNECT_EVERY", "16"))
+
+
+async def _dropped(raw, tick: int) -> bool:
+    return tick % _DISCONNECT_CHECK_EVERY == 0 and await raw.is_disconnected()
 
 
 def build_app(engine: AsyncEngine) -> FastAPI:
@@ -125,9 +136,10 @@ def _usage(prompt_tokens: int, completion_tokens: int) -> UsageInfo:
 async def _collect(engine, prompt, params, request_id, raw) -> tuple[str, str | None, int]:
     """Non-streaming: run to completion, detokenize once."""
     detok = engine.tokenizer.incremental_detokenizer()
-    finish, n_out = None, 0
+    finish, n_out, tick = None, 0, 0
     async for out in engine.generate(prompt, params, request_id):
-        if await raw.is_disconnected():
+        tick += 1
+        if await _dropped(raw, tick):
             await engine.abort(request_id)
             break
         comp = out.outputs[0]
@@ -147,8 +159,10 @@ async def _stream_completion(
 ) -> AsyncIterator[str]:
     created = int(time.time())
     detok = engine.tokenizer.incremental_detokenizer()
+    tick = 0
     async for out in engine.generate(prompt, params, request_id):
-        if await raw.is_disconnected():
+        tick += 1
+        if await _dropped(raw, tick):
             await engine.abort(request_id)
             return
         comp = out.outputs[0]
@@ -179,8 +193,10 @@ async def _stream_chat(
         choices=[ChatStreamChoice(index=0, delta=DeltaMessage(role="assistant"))],
     )
     yield f"data: {first.model_dump_json()}\n\n"
+    tick = 0
     async for out in engine.generate(prompt_ids, params, request_id):
-        if await raw.is_disconnected():
+        tick += 1
+        if await _dropped(raw, tick):
             await engine.abort(request_id)
             return
         comp = out.outputs[0]
