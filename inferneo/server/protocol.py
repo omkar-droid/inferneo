@@ -64,9 +64,24 @@ class CompletionRequest(_SamplingFields):
     prompt: str | list[str]
 
 
+class ImageURL(BaseModel):
+    url: str  # http(s) URL or a data: URI
+
+
+class ContentPart(BaseModel):
+    """One part of an OpenAI multimodal message content array."""
+
+    type: str  # "text" | "image_url" | "input_audio"
+    text: str | None = None
+    image_url: ImageURL | None = None
+
+
 class ChatMessage(BaseModel):
     role: str
-    content: str
+    # OpenAI allows content to be a plain string, or a list of typed parts:
+    #   [{"type": "text", "text": "..."},
+    #    {"type": "image_url", "image_url": {"url": "..."}}]
+    content: str | list[ContentPart]
 
 
 class ChatCompletionRequest(_SamplingFields):

@@ -16,6 +16,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from inferneo.engine.async_engine import AsyncEngine
+from inferneo.inputs.processor import UnsupportedModality
 from inferneo.server.protocol import (
     ChatChoice,
     ChatCompletionRequest,
@@ -103,23 +104,34 @@ def build_app(engine: AsyncEngine) -> FastAPI:
 
     @app.post("/v1/chat/completions")
     async def chat_completions(req: ChatCompletionRequest, raw: Request):
-        messages = [{"role": m.role, "content": m.content} for m in req.messages]
-        if engine.tokenizer.has_chat_template():
-            prompt_ids = engine.tokenizer.apply_chat_template(messages)
-        else:
-            joined = "\n".join(f"{m['role']}: {m['content']}" for m in messages)
-            prompt_ids = engine.tokenizer.encode(joined + "\nassistant:")
+        # Content may be a plain string or OpenAI multimodal parts. The input
+        # processor is the *only* place that knows the difference — it hands the
+        # engine one common EngineInput, so no modality logic leaks downstream.
+        messages = [
+            {
+                "role": m.role,
+                "content": m.content
+                if isinstance(m.content, str)
+                else [p.model_dump() for p in m.content],
+            }
+            for m in req.messages
+        ]
+        try:
+            engine_input = engine.input_processor.from_chat(messages)
+        except UnsupportedModality as e:
+            raise HTTPException(status_code=501, detail=str(e)) from e
+
         params = req.to_sampling_params()
         request_id = f"chatcmpl-{uuid.uuid4().hex}"
-        _check_length(engine, prompt_ids)
+        _check_length(engine, engine_input.token_ids)
 
         if req.stream:
             return StreamingResponse(
-                _stream_chat(engine, prompt_ids, params, request_id, req.model, raw),
+                _stream_chat(engine, engine_input, params, request_id, req.model, raw),
                 media_type="text/event-stream",
             )
 
-        text, finish, n_out = await _collect(engine, prompt_ids, params, request_id, raw)
+        text, finish, n_out = await _collect(engine, engine_input, params, request_id, raw)
         return ChatCompletionResponse(
             id=request_id,
             model=req.model,
@@ -130,7 +142,7 @@ def build_app(engine: AsyncEngine) -> FastAPI:
                     finish_reason=finish,
                 )
             ],
-            usage=_usage(len(prompt_ids), n_out),
+            usage=_usage(len(engine_input.token_ids), n_out),
         )
 
     return app
@@ -197,7 +209,7 @@ async def _stream_completion(
 
 
 async def _stream_chat(
-    engine, prompt_ids, params, request_id, model, raw
+    engine, engine_input, params, request_id, model, raw
 ) -> AsyncIterator[str]:
     created = int(time.time())
     detok = engine.tokenizer.incremental_detokenizer()
@@ -208,7 +220,7 @@ async def _stream_chat(
     )
     yield f"data: {first.model_dump_json()}\n\n"
     tick = 0
-    async for out in engine.generate(prompt_ids, params, request_id):
+    async for out in engine.generate(engine_input, params, request_id):
         tick += 1
         if await _dropped(raw, tick):
             await engine.abort(request_id)

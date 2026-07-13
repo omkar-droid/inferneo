@@ -13,6 +13,8 @@ from inferneo.config import EngineConfig, ModelConfig
 from inferneo.engine import trace
 from inferneo.engine.request import EngineRequest
 from inferneo.engine.scheduler import Scheduler
+from inferneo.inputs.processor import InputProcessor
+from inferneo.inputs.types import EngineInput
 from inferneo.kv.block_manager import KVCacheManager
 from inferneo.outputs import (
     CompletionOutput,
@@ -41,6 +43,28 @@ class InferneoEngine:
         )
         self.scheduler = Scheduler(config.scheduler, kv, self.max_model_len)
         self._step_count = 0
+        self.input_processor = self._build_input_processor()
+
+    def _build_input_processor(self) -> InputProcessor:
+        """One place that turns request content (text / image / …) into an
+        EngineInput. Transports call this; the engine below never sees a modality."""
+        vision = getattr(self.runner, "vision", None)
+        if vision is None:
+            return InputProcessor(self.tokenizer)
+
+        from transformers import AutoProcessor
+
+        hf_proc = AutoProcessor.from_pretrained(self.config.model.model)
+        image_token_id = getattr(self.runner.hf_config, "image_token_index", None)
+        if image_token_id is None:
+            image_token_id = self.tokenizer.hf.convert_tokens_to_ids("<image>")
+        return InputProcessor(
+            self.tokenizer,
+            vision=vision,
+            hf_processor=hf_proc,
+            embedder=self.runner.model.embed,
+            image_token_id=image_token_id,
+        )
 
     @classmethod
     def from_model(cls, model: str, **kwargs) -> InferneoEngine:
@@ -50,15 +74,19 @@ class InferneoEngine:
 
     def add_request(
         self,
-        prompt: str | list[int],
+        prompt: str | list[int] | EngineInput,
         sampling_params: SamplingParams | None = None,
         request_id: str | None = None,
     ) -> str:
         params = sampling_params or SamplingParams()
-        if isinstance(prompt, str):
-            prompt_text, prompt_ids = prompt, self.tokenizer.encode(prompt)
+        if isinstance(prompt, EngineInput):
+            engine_input = prompt
+        elif isinstance(prompt, str):
+            engine_input = EngineInput(token_ids=self.tokenizer.encode(prompt), text=prompt)
         else:
-            prompt_text, prompt_ids = None, list(prompt)
+            engine_input = EngineInput(token_ids=list(prompt))
+
+        prompt_ids = engine_input.token_ids
         if not prompt_ids:
             raise ValueError("empty prompt")
         if len(prompt_ids) >= self.max_model_len:
@@ -71,8 +99,13 @@ class InferneoEngine:
             prompt_token_ids=prompt_ids,
             sampling_params=params,
             eos_token_id=self.tokenizer.eos_token_id,
-            prompt=prompt_text,
+            prompt=engine_input.text,
         )
+        # Precomputed embeddings (an image) are a GPU tensor, so they go straight
+        # to the runner — never through SchedulerOutput, which stays torch-free
+        # and serializable. The scheduler only ever sees token counts.
+        if engine_input.is_multimodal:
+            self.runner.set_prompt_embeds(req.request_id, engine_input.prompt_embeds)
         self.scheduler.add_request(req)
         return req.request_id
 
