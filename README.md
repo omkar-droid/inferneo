@@ -35,6 +35,9 @@ each request, and prefill / decode / chunked-prefill all fall out of that automa
 - **Multimodal**: LLaVA vision support — a CLIP tower + projector produce image embeddings that are
   spliced into the token sequence, so the paged KV cache, scheduler and CUDA graphs treat an image
   as just rows in the sequence. OpenAI multimodal message content is accepted as-is.
+- **Long-context RoPE scaling**: YaRN, linear, and Llama-3 scaling — `inv_freq` matches HuggingFace
+  to 0.0, so models extended past their trained window (Qwen2.5, DeepSeek, long-context fine-tunes)
+  serve correctly instead of being refused.
 - **Pluggable attention backends**: a pure-torch SDPA reference that runs on **CPU / MPS / CUDA**,
   and a **FlashInfer** fast path auto-selected on CUDA.
 - **Hash-chain prefix caching** for shared prompts (opt-in).
@@ -157,6 +160,8 @@ overhead and kernel fusion, not correctness. Full methodology and the serving-la
 token-for-token — verified across single requests, ragged batches, chunked prefill,
 preemption-and-resume, and prefix caching, on both a tiny random model (CPU, exact) and real
 TinyLlama-1.1B. On CUDA, the FlashInfer backend is cross-checked against the SDPA reference.
+The vision path matches HuggingFace LLaVA token-for-token on a real image (14/14 tokens), and
+RoPE scaling (YaRN / linear / Llama-3) matches HF's `inv_freq` exactly.
 
 ```bash
 pytest                      # unit (torch-free) + correctness vs HF + e2e HTTP, CPU only
