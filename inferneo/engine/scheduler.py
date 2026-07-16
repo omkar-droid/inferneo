@@ -6,18 +6,23 @@ shared token budget: a decode is 1 token, a fresh prompt is N, a chunked
 prefill is whatever fits. Mixed batches fall out for free, and chunked
 prefill is implicit.
 
-Scheduling policy: FCFS. RUNNING requests are served first (a decode never
-starves behind new prompts); WAITING requests are admitted while budget and
-KV blocks remain. Under memory pressure the most recently admitted running
-request is preempted — its blocks are freed and it re-queues at the head of
-WAITING for recompute-on-resume (with prefix caching on, resume hits the
-cache for any blocks not yet evicted).
+Scheduling policy: priority, then FCFS. RUNNING requests are served first (a
+decode never starves behind new prompts); WAITING requests are admitted in
+priority order (higher priority first, arrival time as tiebreak) while budget and
+KV blocks remain — so an interactive request jumps ahead of a queued batch job
+and is admitted as soon as a slot frees. Under memory pressure the most recently
+admitted running request is preempted — its blocks are freed and it re-queues for
+recompute-on-resume (with prefix caching on, resume hits the cache for any blocks
+not yet evicted).
+
+Priority affects *admission order*, not preemption: a high-priority arrival waits
+for the next freed slot rather than evicting a running low-priority request.
+Preemptive priority would be the next step.
 """
 
 from __future__ import annotations
 
 import time
-from collections import deque
 
 from inferneo.config import SchedulerConfig
 from inferneo.engine.interfaces import ModelRunnerOutput, ScheduledRequest, SchedulerOutput
@@ -36,7 +41,7 @@ class Scheduler:
         self.kv = kv
         self.max_model_len = max_model_len
 
-        self.waiting: deque[EngineRequest] = deque()
+        self.waiting: list[EngineRequest] = []
         self.running: list[EngineRequest] = []
         self.requests: dict[str, EngineRequest] = {}
         # Finished/aborted since the last schedule(); reported to the runner
@@ -101,6 +106,11 @@ class Scheduler:
             idx += 1
 
         # -- 2. waiting requests (skip if we just preempted: no churn) ------
+        # Priority order: highest priority first, arrival time (FCFS) as tiebreak.
+        # Sorting each step keeps the scheduler a plain list (readable, torch-free)
+        # and is cheap for realistic queue depths.
+        if not preempted and self.waiting:
+            self.waiting.sort(key=lambda r: (-r.priority, r.arrival_time))
         while (
             not preempted
             and self.waiting
@@ -122,8 +132,8 @@ class Scheduler:
                         f"pool holds even with nothing else running; increase "
                         f"cache num_blocks or reduce max_num_batched_tokens"
                     )
-                break
-            self.waiting.popleft()
+                break  # top-priority request can't fit — it waits (don't skip it)
+            self.waiting.pop(0)
             req.status = RequestStatus.RUNNING
             req.num_computed_tokens = num_cached
             if req.first_scheduled_time is None:
@@ -172,7 +182,9 @@ class Scheduler:
         self.kv.free(req)
         req.status = RequestStatus.PREEMPTED
         req.num_computed_tokens = 0
-        self.waiting.appendleft(req)
+        # Re-queue for recompute-on-resume; the priority sort in schedule() puts it
+        # back near the front (its original arrival_time is preserved).
+        self.waiting.append(req)
 
     def _finish(self, req: EngineRequest, status: RequestStatus) -> None:
         req.status = status

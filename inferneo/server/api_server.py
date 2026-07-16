@@ -89,11 +89,11 @@ def build_app(engine: AsyncEngine) -> FastAPI:
 
         if req.stream:
             return StreamingResponse(
-                _stream_completion(engine, prompt, params, request_id, req.model, raw),
+                _stream_completion(engine, prompt, params, request_id, req.model, raw, req.priority),
                 media_type="text/event-stream",
             )
 
-        text, finish, n_out = await _collect(engine, prompt, params, request_id, raw)
+        text, finish, n_out = await _collect(engine, prompt, params, request_id, raw, req.priority)
         return CompletionResponse(
             model=req.model,
             choices=[CompletionChoice(index=0, text=text, finish_reason=finish)],
@@ -127,11 +127,11 @@ def build_app(engine: AsyncEngine) -> FastAPI:
 
         if req.stream:
             return StreamingResponse(
-                _stream_chat(engine, engine_input, params, request_id, req.model, raw),
+                _stream_chat(engine, engine_input, params, request_id, req.model, raw, req.priority),
                 media_type="text/event-stream",
             )
 
-        text, finish, n_out = await _collect(engine, engine_input, params, request_id, raw)
+        text, finish, n_out = await _collect(engine, engine_input, params, request_id, raw, req.priority)
         return ChatCompletionResponse(
             id=request_id,
             model=req.model,
@@ -159,11 +159,11 @@ def _usage(prompt_tokens: int, completion_tokens: int) -> UsageInfo:
     )
 
 
-async def _collect(engine, prompt, params, request_id, raw) -> tuple[str, str | None, int]:
+async def _collect(engine, prompt, params, request_id, raw, priority=0) -> tuple[str, str | None, int]:
     """Non-streaming: run to completion, detokenize once."""
     detok = engine.tokenizer.incremental_detokenizer()
     finish, n_out, tick = None, 0, 0
-    async for out in engine.generate(prompt, params, request_id):
+    async for out in engine.generate(prompt, params, request_id, priority=priority):
         tick += 1
         if await _dropped(raw, tick):
             await engine.abort(request_id)
@@ -181,12 +181,12 @@ async def _collect(engine, prompt, params, request_id, raw) -> tuple[str, str | 
 
 
 async def _stream_completion(
-    engine, prompt, params, request_id, model, raw
+    engine, prompt, params, request_id, model, raw, priority=0
 ) -> AsyncIterator[str]:
     created = int(time.time())
     detok = engine.tokenizer.incremental_detokenizer()
     tick = 0
-    async for out in engine.generate(prompt, params, request_id):
+    async for out in engine.generate(prompt, params, request_id, priority=priority):
         tick += 1
         if await _dropped(raw, tick):
             await engine.abort(request_id)
@@ -209,7 +209,7 @@ async def _stream_completion(
 
 
 async def _stream_chat(
-    engine, engine_input, params, request_id, model, raw
+    engine, engine_input, params, request_id, model, raw, priority=0
 ) -> AsyncIterator[str]:
     created = int(time.time())
     detok = engine.tokenizer.incremental_detokenizer()
@@ -220,7 +220,7 @@ async def _stream_chat(
     )
     yield f"data: {first.model_dump_json()}\n\n"
     tick = 0
-    async for out in engine.generate(engine_input, params, request_id):
+    async for out in engine.generate(engine_input, params, request_id, priority=priority):
         tick += 1
         if await _dropped(raw, tick):
             await engine.abort(request_id)

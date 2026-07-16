@@ -15,11 +15,12 @@ def build(num_blocks=64, block_size=4, max_model_len=256, **sched_kwargs):
     return Scheduler(cfg, kv, max_model_len)
 
 
-def add(sched, rid, num_prompt, max_tokens=8):
+def add(sched, rid, num_prompt, max_tokens=8, priority=0):
     req = EngineRequest(
         request_id=rid,
         prompt_token_ids=list(range(num_prompt)),
         sampling_params=SamplingParams(max_tokens=max_tokens, ignore_eos=True),
+        priority=priority,
     )
     sched.add_request(req)
     return req
@@ -158,3 +159,42 @@ def test_abort_waiting_request():
     sched.abort("b")
     assert "b" not in sched.requests
     assert all(r.request_id != "b" for r in sched.waiting)
+
+
+# ---- priority scheduling ----
+
+
+def test_high_priority_admitted_first():
+    """With one admission slot per step, the highest-priority waiting request must
+    be admitted before lower-priority ones, regardless of arrival order."""
+    sched = build(max_num_batched_tokens=64, max_num_seqs=1)
+    add(sched, "low1", num_prompt=3, priority=0)
+    add(sched, "low2", num_prompt=3, priority=0)
+    add(sched, "urgent", num_prompt=3, priority=10)  # arrived LAST, highest priority
+
+    so = sched.schedule()
+    assert [s.request_id for s in so.scheduled] == ["urgent"]  # jumped the queue
+
+
+def test_same_priority_is_fcfs():
+    """Ties broken by arrival order — priority must not scramble FCFS."""
+    sched = build(max_num_batched_tokens=64, max_num_seqs=1)
+    add(sched, "first", num_prompt=3, priority=5)
+    add(sched, "second", num_prompt=3, priority=5)
+    so = sched.schedule()
+    assert [s.request_id for s in so.scheduled] == ["first"]
+
+
+def test_priority_orders_a_backlog():
+    """A full backlog drains in priority order as slots free up."""
+    sched = build(max_num_batched_tokens=64, max_num_seqs=1)
+    add(sched, "p1", num_prompt=2, max_tokens=1, priority=1)
+    add(sched, "p5", num_prompt=2, max_tokens=1, priority=5)
+    add(sched, "p3", num_prompt=2, max_tokens=1, priority=3)
+
+    admitted = []
+    for _ in range(3):
+        so = sched.schedule()
+        admitted += [s.request_id for s in so.scheduled if s.is_new]
+        sched.update_from_output(so, fake_output(so))  # finishes (max_tokens=1) -> frees the slot
+    assert admitted == ["p5", "p3", "p1"]  # strictly high -> low
