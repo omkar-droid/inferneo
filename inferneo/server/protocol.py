@@ -33,6 +33,8 @@ class _SamplingFields(BaseModel):
     ignore_eos: bool = False
     logprobs: int | None = Field(None, ge=0)
     stream: bool = False
+    # Scheduling priority — higher is served first (an inferneo extension).
+    priority: int = 0
 
     @field_validator("top_k")
     @classmethod

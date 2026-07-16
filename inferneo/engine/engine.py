@@ -77,6 +77,7 @@ class InferneoEngine:
         prompt: str | list[int] | EngineInput,
         sampling_params: SamplingParams | None = None,
         request_id: str | None = None,
+        priority: int = 0,
     ) -> str:
         params = sampling_params or SamplingParams()
         if isinstance(prompt, EngineInput):
@@ -100,6 +101,7 @@ class InferneoEngine:
             sampling_params=params,
             eos_token_id=self.tokenizer.eos_token_id,
             prompt=engine_input.text,
+            priority=priority,
         )
         # Precomputed embeddings (an image) are a GPU tensor, so they go straight
         # to the runner — never through SchedulerOutput, which stays torch-free

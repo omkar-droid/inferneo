@@ -50,6 +50,8 @@ class EngineRequest:
     sampling_params: SamplingParams
     eos_token_id: int | None = None
     prompt: str | None = None
+    # Scheduling priority: higher is served first; ties broken by arrival (FCFS).
+    priority: int = 0
     arrival_time: float = field(default_factory=time.monotonic)
 
     status: RequestStatus = RequestStatus.WAITING

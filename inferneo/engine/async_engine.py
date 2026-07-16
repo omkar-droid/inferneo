@@ -36,7 +36,7 @@ class AsyncEngine:
         self._thread: threading.Thread | None = None
         self._running = False
         self._lock = threading.Lock()
-        self._inbox: deque[tuple[str, object, SamplingParams]] = deque()
+        self._inbox: deque[tuple[str, object, SamplingParams, int]] = deque()
         self._aborts: deque[str] = deque()
         self._queues: dict[str, asyncio.Queue] = {}
         self._error: BaseException | None = None
@@ -69,9 +69,9 @@ class AsyncEngine:
             while self._running:
                 with self._lock:
                     while self._inbox:
-                        rid, prompt, params = self._inbox.popleft()
+                        rid, prompt, params, priority = self._inbox.popleft()
                         try:
-                            engine.add_request(prompt, params, rid)
+                            engine.add_request(prompt, params, rid, priority=priority)
                         except Exception as exc:  # noqa: BLE001
                             # A bad request (e.g. prompt longer than max_model_len)
                             # must fail only *that* request — never take down the
@@ -116,6 +116,7 @@ class AsyncEngine:
         prompt: str | list[int],
         sampling_params: SamplingParams,
         request_id: str | None = None,
+        priority: int = 0,
     ) -> AsyncIterator[RequestOutput]:
         if self._error is not None:
             raise RuntimeError("inferneo engine thread has crashed") from self._error
@@ -127,7 +128,7 @@ class AsyncEngine:
         queue: asyncio.Queue[RequestOutput] = asyncio.Queue()
         self._queues[request_id] = queue
         with self._lock:
-            self._inbox.append((request_id, prompt, sampling_params))
+            self._inbox.append((request_id, prompt, sampling_params, priority))
         try:
             while True:
                 item = await queue.get()
