@@ -31,9 +31,10 @@ each request, and prefill / decode / chunked-prefill all fall out of that automa
 
 - **Paged KV cache + continuous batching** with chunked prefill and preemption under memory pressure.
 - **Unified token-budget scheduler** (vLLM-V1 style) — no prefill/decode phase split.
-- **Priority scheduling** — a `priority` field admits interactive requests ahead of a queued
-  batch backlog (FCFS within a priority). In a 12-job backlog, an urgent request's time-to-first-
-  token drops from 91 steps to 1.
+- **Priority scheduling (preemptive)** — a `priority` field admits interactive requests ahead of a
+  queued batch backlog, and when every slot is full it *evicts* the lowest-priority running job
+  (strict-inequality eviction, so no thrashing). In a fully-saturated engine, an urgent request's
+  time-to-first-token drops from blocked-indefinitely to 1 step.
 - **Own Llama-family model** (Llama 2/3, TinyLlama, Mistral) loading HuggingFace safetensors directly.
 - **Multimodal**: LLaVA vision support — a CLIP tower + projector produce image embeddings that are
   spliced into the token sequence, so the paged KV cache, scheduler and CUDA graphs treat an image

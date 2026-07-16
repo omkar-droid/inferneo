@@ -15,9 +15,10 @@ admitted running request is preempted — its blocks are freed and it re-queues 
 recompute-on-resume (with prefix caching on, resume hits the cache for any blocks
 not yet evicted).
 
-Priority affects *admission order*, not preemption: a high-priority arrival waits
-for the next freed slot rather than evicting a running low-priority request.
-Preemptive priority would be the next step.
+Priority is also *preemptive*: if every slot is held by lower-priority work, a
+strictly higher-priority arrival evicts the lowest-priority running request rather
+than waiting for a slot to free. Strict inequality prevents thrashing — the evicted
+request now ranks below the one it made way for, so it cannot evict it back.
 """
 
 from __future__ import annotations
@@ -82,7 +83,17 @@ class Scheduler:
         budget = self.config.max_num_batched_tokens
         preempted: list[EngineRequest] = []
 
+        # -- 0. preemptive priority ----------------------------------------
+        # Before anything runs, if a high-priority request is waiting and every
+        # slot is held by lower-priority work, evict the lowest-priority running
+        # request to make room. Done here (not after phase 1) so the victim's step
+        # isn't computed and thrown away. Strict '>' prevents thrashing: the evicted
+        # request now has lower priority than the one it made way for, so it can't
+        # immediately evict it back.
+        self._preempt_for_priority(preempted)
+
         # -- 1. running requests, FCFS -------------------------------------
+        block_preempted = False
         idx = 0
         while idx < len(self.running) and budget > 0:
             req = self.running[idx]
@@ -96,6 +107,7 @@ class Scheduler:
                 victim = self.running.pop()
                 self._preempt(victim)
                 preempted.append(victim)
+                block_preempted = True
                 if victim is req:
                     break
             if req.status == RequestStatus.PREEMPTED:
@@ -105,14 +117,17 @@ class Scheduler:
             out.scheduled.append(self._make_scheduled(req, num_new, is_new=False))
             idx += 1
 
-        # -- 2. waiting requests (skip if we just preempted: no churn) ------
+        # -- 2. waiting requests -------------------------------------------
+        # Skipped only after a *block-pressure* preemption (phase 1) — admitting
+        # then would just re-thrash the KV pool. A *priority* preemption (phase 0)
+        # deliberately freed a slot for a waiting request, so admission proceeds.
         # Priority order: highest priority first, arrival time (FCFS) as tiebreak.
         # Sorting each step keeps the scheduler a plain list (readable, torch-free)
         # and is cheap for realistic queue depths.
-        if not preempted and self.waiting:
+        if not block_preempted and self.waiting:
             self.waiting.sort(key=lambda r: (-r.priority, r.arrival_time))
         while (
-            not preempted
+            not block_preempted
             and self.waiting
             and budget > 0
             and len(self.running) < self.config.max_num_seqs
@@ -177,6 +192,24 @@ class Scheduler:
     # ------------------------------------------------------------------ #
     # internals
     # ------------------------------------------------------------------ #
+
+    def _preempt_for_priority(self, preempted: list[EngineRequest]) -> None:
+        """Evict the lowest-priority running request(s) so a strictly higher-priority
+        waiting request can be admitted when every slot is taken. No-op if there is a
+        free slot, or if nothing waiting out-ranks the lowest running request."""
+        if not self.waiting:
+            return
+        top = max(self.waiting, key=lambda r: (r.priority, -r.arrival_time))
+        while (
+            len(self.running) >= self.config.max_num_seqs
+            and self.running
+            and top.priority > min(r.priority for r in self.running)
+        ):
+            # lowest priority, then newest (largest arrival_time) among ties
+            victim = min(self.running, key=lambda r: (r.priority, -r.arrival_time))
+            self.running.remove(victim)
+            self._preempt(victim)
+            preempted.append(victim)
 
     def _preempt(self, req: EngineRequest) -> None:
         self.kv.free(req)
