@@ -35,7 +35,10 @@ each request, and prefill / decode / chunked-prefill all fall out of that automa
   queued batch backlog, and when every slot is full it *evicts* the lowest-priority running job
   (strict-inequality eviction, so no thrashing). In a fully-saturated engine, an urgent request's
   time-to-first-token drops from blocked-indefinitely to 1 step.
-- **Own Llama-family model** (Llama 2/3, TinyLlama, Mistral) loading HuggingFace safetensors directly.
+- **Model-general, not Llama-only** — Llama 2/3, TinyLlama, Mistral, **Qwen2.5, Qwen3** load from
+  HuggingFace safetensors directly. The engine is architecture-agnostic; a new family is a registry
+  entry plus (at most) a small attention subclass — Qwen2 is "Llama + qkv bias", Qwen3 adds per-head
+  QK-norm, each ~4 lines. Verified token-for-token vs HuggingFace.
 - **Multimodal**: LLaVA vision support — a CLIP tower + projector produce image embeddings that are
   spliced into the token sequence, so the paged KV cache, scheduler and CUDA graphs treat an image
   as just rows in the sequence. OpenAI multimodal message content is accepted as-is.
