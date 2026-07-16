@@ -17,20 +17,38 @@ from inferneo.models.layers import RMSNorm, RotaryEmbedding, get_rope_parameters
 
 
 class LlamaAttention(nn.Module):
+    """Grouped-query attention. Config-driven so one class serves several families:
+
+    - qkv_bias / o_bias: Llama has neither; Qwen2 has qkv bias but no o bias.
+    - qk_norm: Qwen3 RMS-normalizes q and k per head before RoPE; Llama/Qwen2 don't.
+
+    Subclasses set these via class attributes; the assembly (rotary, KV cache,
+    fused QKV) is shared.
+    """
+
+    qkv_bias: bool | None = None   # None -> fall back to config.attention_bias
+    o_bias: bool | None = None
+    qk_norm: bool = False
+
     def __init__(self, config, backend: AttentionBackend):
         super().__init__()
         hidden = config.hidden_size
         self.num_heads = config.num_attention_heads
         self.num_kv_heads = config.num_key_value_heads
         self.head_dim = getattr(config, "head_dim", None) or hidden // self.num_heads
-        bias = getattr(config, "attention_bias", False)
+        attn_bias = getattr(config, "attention_bias", False)
+        qkv_bias = attn_bias if self.qkv_bias is None else self.qkv_bias
+        o_bias = attn_bias if self.o_bias is None else self.o_bias
 
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         # Fused QKV: one GEMM instead of three cuts kernel count in the
         # latency-bound decode path. Split back after the projection.
-        self.qkv_proj = nn.Linear(hidden, self.q_size + 2 * self.kv_size, bias=bias)
-        self.o_proj = nn.Linear(self.q_size, hidden, bias=bias)
+        self.qkv_proj = nn.Linear(hidden, self.q_size + 2 * self.kv_size, bias=qkv_bias)
+        self.o_proj = nn.Linear(self.q_size, hidden, bias=o_bias)
+        if self.qk_norm:
+            self.q_norm = RMSNorm(self.head_dim, config.rms_norm_eps)
+            self.k_norm = RMSNorm(self.head_dim, config.rms_norm_eps)
         self.backend = backend
 
     def forward(self, x, positions, rotary, kv_cache, attn_metadata):
@@ -39,6 +57,8 @@ class LlamaAttention(nn.Module):
         q = q.view(t, self.num_heads, self.head_dim)
         k = k.view(t, self.num_kv_heads, self.head_dim)
         v = v.view(t, self.num_kv_heads, self.head_dim)
+        if self.qk_norm:
+            q, k = self.q_norm(q), self.k_norm(k)   # per-head RMSNorm before RoPE (Qwen3)
         q, k = rotary(positions, q, k)
         out = self.backend.forward(q, k, v, kv_cache, attn_metadata)
         return self.o_proj(out.reshape(t, self.q_size))
@@ -60,9 +80,9 @@ class LlamaMLP(nn.Module):
 
 
 class LlamaDecoderLayer(nn.Module):
-    def __init__(self, config, backend: AttentionBackend):
+    def __init__(self, config, backend: AttentionBackend, attention_cls=LlamaAttention):
         super().__init__()
-        self.self_attn = LlamaAttention(config, backend)
+        self.self_attn = attention_cls(config, backend)
         self.mlp = LlamaMLP(config)
         self.input_layernorm = RMSNorm(config.hidden_size, config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(config.hidden_size, config.rms_norm_eps)
@@ -75,11 +95,12 @@ class LlamaDecoderLayer(nn.Module):
 
 
 class LlamaModel(nn.Module):
-    def __init__(self, config, backend: AttentionBackend):
+    def __init__(self, config, backend: AttentionBackend, attention_cls=LlamaAttention):
         super().__init__()
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size)
         self.layers = nn.ModuleList(
-            LlamaDecoderLayer(config, backend) for _ in range(config.num_hidden_layers)
+            LlamaDecoderLayer(config, backend, attention_cls)
+            for _ in range(config.num_hidden_layers)
         )
         self.norm = RMSNorm(config.hidden_size, config.rms_norm_eps)
         head_dim = getattr(config, "head_dim", None) or (
@@ -101,10 +122,13 @@ class LlamaModel(nn.Module):
 
 
 class LlamaForCausalLM(nn.Module):
+    # Subclasses (other families) override this with their attention variant.
+    attention_cls = LlamaAttention
+
     def __init__(self, config, backend: AttentionBackend):
         super().__init__()
         self.config = config
-        self.model = LlamaModel(config, backend)
+        self.model = LlamaModel(config, backend, self.attention_cls)
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
 
     def forward(
