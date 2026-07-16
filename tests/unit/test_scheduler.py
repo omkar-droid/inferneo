@@ -198,3 +198,68 @@ def test_priority_orders_a_backlog():
         admitted += [s.request_id for s in so.scheduled if s.is_new]
         sched.update_from_output(so, fake_output(so))  # finishes (max_tokens=1) -> frees the slot
     assert admitted == ["p5", "p3", "p1"]  # strictly high -> low
+
+
+# ---- preemptive priority ----
+
+
+def test_priority_preempts_when_slots_full():
+    """When the only slot is held by a low-priority job, a higher-priority arrival
+    evicts it rather than waiting for it to finish."""
+    sched = build(max_num_batched_tokens=64, max_num_seqs=1)
+    add(sched, "low", num_prompt=3, max_tokens=50, priority=0)
+    sched.update_from_output(so := sched.schedule(), fake_output(so))  # low is running
+
+    add(sched, "urgent", num_prompt=3, max_tokens=5, priority=10)
+    so = sched.schedule()
+    assert so.preempted_ids == ["low"]                       # low evicted
+    assert any(s.request_id == "urgent" and s.is_new for s in so.scheduled)  # urgent admitted now
+    assert sched.requests["low"].status == RequestStatus.PREEMPTED
+
+
+def test_no_thrash_after_priority_preemption():
+    """The evicted request must NOT immediately evict the one it made way for —
+    strict '>' means the (now lower-ranked) victim can't preempt back."""
+    sched = build(max_num_batched_tokens=64, max_num_seqs=1)
+    add(sched, "low", num_prompt=3, max_tokens=50, priority=0)
+    sched.update_from_output(so := sched.schedule(), fake_output(so))
+    add(sched, "urgent", num_prompt=3, max_tokens=50, priority=10)
+    sched.update_from_output(so := sched.schedule(), fake_output(so))  # urgent preempts low
+
+    for _ in range(5):                                       # several steps: must stay put
+        so = sched.schedule()
+        assert so.preempted_ids == []                       # no back-and-forth
+        assert any(s.request_id == "urgent" for s in so.scheduled)
+        sched.update_from_output(so, fake_output(so))
+    assert sched.requests["urgent"].status == RequestStatus.RUNNING
+    assert sched.requests["low"].status == RequestStatus.PREEMPTED
+
+
+def test_equal_priority_does_not_preempt():
+    """Only a *strictly* higher priority preempts — equal priority waits (FCFS)."""
+    sched = build(max_num_batched_tokens=64, max_num_seqs=1)
+    add(sched, "a", num_prompt=3, max_tokens=50, priority=5)
+    sched.update_from_output(so := sched.schedule(), fake_output(so))
+    add(sched, "b", num_prompt=3, max_tokens=50, priority=5)
+    so = sched.schedule()
+    assert so.preempted_ids == []                           # a keeps its slot
+    assert sched.requests["a"].status == RequestStatus.RUNNING
+
+
+def test_preemptive_priority_both_finish():
+    """Stability: urgent runs to completion, then the preempted low resumes and
+    finishes too — no hang, no lost request."""
+    sched = build(num_blocks=64, block_size=4, max_num_batched_tokens=64, max_num_seqs=1)
+    add(sched, "low", num_prompt=3, max_tokens=4, priority=0)
+    sched.update_from_output(so := sched.schedule(), fake_output(so))
+    add(sched, "urgent", num_prompt=3, max_tokens=4, priority=10)
+    done = []
+    for _ in range(40):
+        if not sched.has_unfinished():
+            break
+        so = sched.schedule()
+        for r in sched.update_from_output(so, fake_output(so)):
+            if r.is_finished:
+                done.append(r.request_id)
+    assert set(done) == {"urgent", "low"}                   # both completed
+    assert done.index("urgent") < done.index("low")         # urgent finished first
