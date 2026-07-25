@@ -44,6 +44,26 @@ def test_completion_nonstreaming(client):
     assert body["usage"]["completion_tokens"] == 8
 
 
+def test_stats_metrics_and_dashboard(client):
+    # Drive some traffic so the counters move.
+    client.post("/v1/completions", json={
+        "model": "tiny", "prompt": "hello world", "max_tokens": 6, "temperature": 0,
+    })
+    s = client.get("/stats").json()
+    assert {"running", "waiting", "kv_cache_usage", "generation_tps", "totals"} <= s.keys()
+    assert s["totals"]["generation_tokens"] >= 1
+    assert s["totals"]["finished_requests"] >= 1
+
+    m = client.get("/metrics")
+    assert m.status_code == 200
+    assert "inferneo_generation_tokens_total" in m.text
+    assert "# TYPE inferneo_kv_cache_usage_ratio gauge" in m.text
+
+    d = client.get("/dashboard")
+    assert d.status_code == 200 and "text/html" in d.headers["content-type"]
+    assert "infer" in d.text.lower()
+
+
 def test_completion_streaming(client):
     with client.stream("POST", "/v1/completions", json={
         "model": "tiny", "prompt": "hello", "max_tokens": 6, "temperature": 0,

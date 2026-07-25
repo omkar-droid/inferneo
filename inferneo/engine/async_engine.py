@@ -154,6 +154,12 @@ class AsyncEngine:
         return self.engine.input_processor
 
     @property
+    def stats(self):
+        """The engine's runtime stats collector (dashboard / Prometheus). Reads
+        are thread-safe; the engine thread writes to it each step."""
+        return self.engine.stats
+
+    @property
     def model_name(self) -> str:
         return self.engine.config.model.model
 

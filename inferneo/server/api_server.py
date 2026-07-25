@@ -13,10 +13,12 @@ import uuid
 from collections.abc import AsyncIterator
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import HTMLResponse, PlainTextResponse, StreamingResponse
 
 from inferneo.engine.async_engine import AsyncEngine
 from inferneo.inputs.processor import UnsupportedModality
+from inferneo.metrics.stats import prometheus_text
+from inferneo.server.dashboard import DASHBOARD_HTML
 from inferneo.server.protocol import (
     ChatChoice,
     ChatCompletionRequest,
@@ -76,6 +78,26 @@ def build_app(engine: AsyncEngine) -> FastAPI:
     @app.get("/v1/models")
     async def models() -> ModelList:
         return ModelList(data=[ModelCard(id=engine.model_name)])
+
+    # ---------------- observability ----------------
+
+    @app.get("/stats")
+    async def stats() -> dict:
+        """Live engine + GPU snapshot (JSON), polled by the dashboard."""
+        return engine.stats.snapshot()
+
+    @app.get("/metrics")
+    async def metrics() -> PlainTextResponse:
+        """Prometheus text exposition — scrape this for Grafana."""
+        return PlainTextResponse(
+            prometheus_text(engine.stats.snapshot()),
+            media_type="text/plain; version=0.0.4; charset=utf-8",
+        )
+
+    @app.get("/dashboard", response_class=HTMLResponse)
+    async def dashboard() -> str:
+        """Self-contained live dashboard — no Prometheus/Grafana required."""
+        return DASHBOARD_HTML
 
     # ---------------- completions ----------------
 

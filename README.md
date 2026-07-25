@@ -43,6 +43,11 @@ each request, and prefill / decode / chunked-prefill all fall out of that automa
   is unchanged across all of them — a new family is a registry entry plus a small model file.
   Verified token-for-token vs HuggingFace (GPT-2 and Phi-2 exact on the real checkpoints; every
   family greedy-identical to HF on the CPU correctness suite).
+- **Live observability, zero infra** — a self-contained dashboard at `/dashboard` polls `/stats` and
+  shows GPU memory + SM utilization (via NVML), KV-cache occupancy, running vs waiting requests,
+  generation tok/s, and TTFT/TPOT percentiles — no Prometheus or Grafana required. A `/metrics`
+  endpoint is exposed alongside for those who *do* want to scrape it into Grafana. The collector is
+  torch-free; GPU numbers come from an injected probe, so it stays testable on CPU.
 - **Multimodal**: LLaVA vision support — a CLIP tower + projector produce image embeddings that are
   spliced into the token sequence, so the paged KV cache, scheduler and CUDA graphs treat an image
   as just rows in the sequence. OpenAI multimodal message content is accepted as-is.
@@ -188,7 +193,8 @@ inferneo/
   executor/    torch_runner.py                                                     (tensor plane)
   attention/   sdpa_backend.py · flashinfer_backend.py · selector.py
   models/      llama.py · qwen.py · gemma.py · phi.py · gpt2.py · layers.py · loader.py · registry.py
-  sampling/    sampler.py        tokenizer/       server/  (OpenAI API)
+  sampling/    sampler.py        tokenizer/       server/  (OpenAI API + /dashboard)
+  metrics/     stats.py                                                          (control plane)
 tests/         unit (torch-free) · correctness (vs HF) · e2e (HTTP)
 benchmarks/    baselines/hf_padded_engine.py · offline_throughput.py
 examples/      offline_inference.py

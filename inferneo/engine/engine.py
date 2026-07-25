@@ -16,6 +16,7 @@ from inferneo.engine.scheduler import Scheduler
 from inferneo.inputs.processor import InputProcessor
 from inferneo.inputs.types import EngineInput
 from inferneo.kv.block_manager import KVCacheManager
+from inferneo.metrics.stats import StatsCollector
 from inferneo.outputs import (
     CompletionOutput,
     RequestMetrics,
@@ -43,6 +44,9 @@ class InferneoEngine:
         )
         self.scheduler = Scheduler(config.scheduler, kv, self.max_model_len)
         self._step_count = 0
+        # Runtime telemetry for the dashboard / Prometheus. Torch-free collector;
+        # GPU numbers come from the runner's probe.
+        self.stats = StatsCollector(gpu_probe=self.runner.gpu_stats)
         self.input_processor = self._build_input_processor()
 
     def _build_input_processor(self) -> InputProcessor:
@@ -126,12 +130,40 @@ class InferneoEngine:
         trace.step(self._step_count, scheduler_output, self.scheduler)
         runner_output = self.runner.execute(scheduler_output)
         updated = self.scheduler.update_from_output(scheduler_output, runner_output)
+        self._record_stats(scheduler_output, updated)
 
         outputs = []
         for req in updated:
             logprob = runner_output.logprobs.get(req.request_id)
             outputs.append(self._to_request_output(req, logprob))
         return outputs
+
+    def _record_stats(self, scheduler_output, updated) -> None:
+        # generation_tokens = one sampled token per updated request; processed
+        # includes prefill (every token pushed through the forward this step).
+        processed = sum(s.num_new_tokens for s in scheduler_output.scheduled)
+        finished_latencies = []
+        for req in updated:
+            if not req.is_finished:
+                continue
+            ttft = (req.first_token_time - req.arrival_time) if req.first_token_time else None
+            e2e = (req.finished_time - req.arrival_time) if req.finished_time else None
+            n = req.num_output_tokens
+            tpot = (
+                (req.finished_time - req.first_token_time) / (n - 1)
+                if req.first_token_time and req.finished_time and n > 1
+                else None
+            )
+            finished_latencies.append((ttft, tpot, e2e))
+        self.stats.record_step(
+            running=len(self.scheduler.running),
+            waiting=len(self.scheduler.waiting),
+            kv_usage=self.scheduler.kv.usage(),
+            processed_tokens=processed,
+            generation_tokens=len(updated),
+            preemptions=len(scheduler_output.preempted_ids),
+            finished_latencies=finished_latencies,
+        )
 
     # ------------------------------------------------------------------ #
 

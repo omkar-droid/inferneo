@@ -77,6 +77,36 @@ class TorchModelRunner:
     def set_prompt_embeds(self, request_id: str, embeds: torch.Tensor) -> None:
         self._prompt_embeds[request_id] = embeds.to(self.device, self.dtype)
 
+    def gpu_stats(self) -> dict | None:
+        """Live GPU signals for the stats collector: device memory always, plus
+        SM utilization / power / temperature when pynvml (nvidia-ml-py) is
+        installed. Returns None off CUDA. Cheap enough to call once per snapshot."""
+        if self.device.type != "cuda":
+            return None
+        free, total = torch.cuda.mem_get_info(self.device)
+        out = {
+            "mem_used_bytes": total - free,
+            "mem_total_bytes": total,
+            "mem_used_frac": (total - free) / total,
+            "torch_reserved_bytes": torch.cuda.memory_reserved(self.device),
+        }
+        try:  # optional: SM utilization / power / temp via NVML
+            import pynvml
+
+            if not getattr(self, "_nvml_ready", False):
+                pynvml.nvmlInit()
+                self._nvml_handle = pynvml.nvmlDeviceGetHandleByIndex(self.device.index or 0)
+                self._nvml_ready = True
+            h = self._nvml_handle
+            util = pynvml.nvmlDeviceGetUtilizationRates(h)
+            out["sm_util"] = util.gpu / 100.0
+            out["mem_bw_util"] = util.memory / 100.0
+            out["power_w"] = pynvml.nvmlDeviceGetPowerUsage(h) / 1000.0
+            out["temp_c"] = pynvml.nvmlDeviceGetTemperature(h, pynvml.NVML_TEMPERATURE_GPU)
+        except Exception:  # noqa: BLE001 — NVML absent/unavailable is fine
+            pass
+        return out
+
     def _build_embeds(self, scheduled, input_t: torch.Tensor) -> torch.Tensor | None:
         """Return the batch's inputs_embeds, or None if it's pure text.
 
