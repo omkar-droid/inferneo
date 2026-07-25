@@ -168,6 +168,13 @@ class LlamaForCausalLM(nn.Module):
         the (few) rows that actually sample — skipping lm_head for the rest."""
         return self.model(input_ids, positions, kv_caches, attn_metadata, inputs_embeds)
 
+    @property
+    def backbone(self) -> nn.Module:
+        """The input_ids+positions -> hidden module (all layers but the lm_head).
+        The CUDA-graph runner captures this; families that name it differently
+        (e.g. GPT-2's `.transformer`) override the accessor."""
+        return self.model
+
     def embed(self, input_ids: torch.Tensor) -> torch.Tensor:
         """Token ids -> embeddings. Multimodal preprocessing needs this to build a
         mixed text+image embedding sequence before the forward pass."""

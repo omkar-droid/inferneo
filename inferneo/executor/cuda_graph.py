@@ -69,11 +69,15 @@ class CUDAGraphDecodeRunner:
         # small buckets and keep the eager (cuBLAS) forward for large ones.
         # FlashInfer attention is opaque to the compiler (a graph break), and the
         # fused kernels are captured in our CUDA graph below.
-        self._plain_transformer = model.model
+        # The backbone is the input_ids+positions -> hidden module (everything but
+        # the lm_head). Its attribute name differs by family (Llama `.model`,
+        # GPT-2 `.transformer`), so ask the model rather than hardcoding it.
+        backbone = model.backbone
+        self._plain_transformer = backbone
         self._compiled_transformer = (
-            torch.compile(model.model, mode="default", dynamic=False, fullgraph=False)
+            torch.compile(backbone, mode="default", dynamic=False, fullgraph=False)
             if compile_forward
-            else model.model
+            else backbone
         )
         self.kv_caches = kv_caches
         self.num_heads = num_heads

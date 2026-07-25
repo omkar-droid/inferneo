@@ -98,6 +98,10 @@ class GPT2LMHeadModel(nn.Module):
     ) -> torch.Tensor:
         return self.transformer(input_ids, positions, kv_caches, attn_metadata, inputs_embeds)
 
+    @property
+    def backbone(self) -> nn.Module:
+        return self.transformer  # GPT-2 names its backbone `transformer`, not `model`
+
     def embed(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.transformer.wte(input_ids)
 

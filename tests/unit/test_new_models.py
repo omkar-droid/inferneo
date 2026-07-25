@@ -163,6 +163,33 @@ def test_gpt2_fuse_transposes_conv1d_drops_mask_and_adds_prefix():
 
 # ---------------------------------------------------------------- registry
 
+def test_backbone_accessor_points_at_the_right_module():
+    """The CUDA-graph runner captures `model.backbone` (all layers but lm_head).
+    Its attribute name differs by family — this guards the GPT-2 fp16 regression
+    where the fast path hardcoded `.model` and GPT-2 uses `.transformer`."""
+    from transformers import GemmaConfig, GPT2Config, PhiConfig
+
+    from inferneo.models.gemma import GemmaForCausalLM
+    from inferneo.models.gpt2 import GPT2LMHeadModel
+    from inferneo.models.phi import PhiForCausalLM
+
+    gpt2_cfg = GPT2Config(vocab_size=256, n_embd=64, n_head=4, n_layer=1, n_positions=128)
+    m = GPT2LMHeadModel(gpt2_cfg, _backend(gpt2_cfg))
+    assert m.backbone is m.transformer
+
+    phi_cfg = PhiConfig(vocab_size=256, hidden_size=64, intermediate_size=128,
+                        num_hidden_layers=1, num_attention_heads=4,
+                        max_position_embeddings=128)
+    m = PhiForCausalLM(phi_cfg, _backend(phi_cfg))
+    assert m.backbone is m.model
+
+    gemma_cfg = GemmaConfig(vocab_size=256, hidden_size=64, intermediate_size=128,
+                            num_hidden_layers=1, num_attention_heads=4,
+                            num_key_value_heads=1, head_dim=16, max_position_embeddings=128)
+    m = GemmaForCausalLM(gemma_cfg, _backend(gemma_cfg))
+    assert m.backbone is m.model
+
+
 def test_registry_resolves_new_families():
     from inferneo.models.gemma import GemmaForCausalLM
     from inferneo.models.gpt2 import GPT2LMHeadModel

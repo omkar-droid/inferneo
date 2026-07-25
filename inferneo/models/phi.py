@@ -105,6 +105,10 @@ class PhiForCausalLM(nn.Module):
     ) -> torch.Tensor:
         return self.model(input_ids, positions, kv_caches, attn_metadata, inputs_embeds)
 
+    @property
+    def backbone(self) -> nn.Module:
+        return self.model
+
     def embed(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_tokens(input_ids)
 
