@@ -3,6 +3,8 @@ windowed rates, latency percentiles, cumulative counters, Prometheus text."""
 
 import inspect
 
+import pytest
+
 from inferneo.metrics.stats import StatsCollector, prometheus_text
 
 
@@ -29,6 +31,34 @@ def test_latency_percentiles_from_finished():
     assert snap["totals"]["finished_requests"] == 5
     assert snap["ttft_ms"]["p50"] == 30
     assert snap["ttft_ms"]["p99"] == 50
+
+
+def test_derived_metrics_and_mfu():
+    info = {"flops_per_token": 2_000_000_000, "peak_flops": 800e12,
+            "gpu_name": "NVIDIA H100 NVL", "cuda_version": "12.4",
+            "compute_capability": "9.0", "gpu_count": 1, "vram_bytes": 100e9}
+    c = StatsCollector(static_info=info)
+    c.record_step(running=64, waiting=0, kv_usage=0.1, processed_tokens=70,
+                  generation_tokens=64, preemptions=2)
+    snap = c.snapshot()
+    assert snap["effective_batch"] == 64            # 64 gen tokens / 1 step
+    assert snap["prefill_fraction"] == (70 - 64) / 70
+    assert snap["preemptions_per_s"] > 0
+    assert snap["achieved_tflops"] is not None
+    # MFU is exactly achieved / peak (magnitude is timing-dependent in a unit test;
+    # the realistic ~few-percent decode value shows up in the H100 capture).
+    assert snap["mfu"] == pytest.approx(snap["achieved_tflops"] * 1e12 / 800e12)
+    assert snap["info"]["gpu_name"] == "NVIDIA H100 NVL"
+
+
+def test_mfu_omitted_without_peak():
+    # unknown GPU (no peak) -> raw TFLOP/s shown, MFU withheld rather than faked
+    c = StatsCollector(static_info={"flops_per_token": 2_000_000_000})
+    c.record_step(running=8, waiting=0, kv_usage=0.0, processed_tokens=8,
+                  generation_tokens=8, preemptions=0)
+    snap = c.snapshot()
+    assert snap["achieved_tflops"] is not None
+    assert snap["mfu"] is None
 
 
 def test_gpu_probe_injected_into_snapshot():

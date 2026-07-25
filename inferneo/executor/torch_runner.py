@@ -23,6 +23,28 @@ from inferneo.sampling.sampler import RequestSamplerState, Sampler
 # reliable free-memory query. Override with CacheConfig.num_blocks.
 _DEFAULT_NON_CUDA_KV_TOKENS = 16384
 
+# Per-GPU bf16/fp16 *dense* tensor-core peak (TFLOP/s), for MFU. Substring match
+# on the device name, longest key first. Datacenter GPUs only — MFU is hidden
+# (never guessed) for anything not listed. Sources: NVIDIA datasheets, dense
+# (non-sparse) figures.
+_PEAK_BF16_TFLOPS = {
+    "H100 NVL": 835.0, "H100 PCIE": 756.0, "H100": 989.0,  # last = SXM
+    "H200": 989.0, "A100": 312.0, "L40S": 362.0, "L40": 181.0,
+    "L4": 121.0, "A10G": 125.0, "A10": 125.0,
+    "RTX 6000 ADA": 364.0, "RTX 4090": 165.0, "RTX 3090": 71.0,
+    "V100": 125.0,
+}
+
+
+def _peak_bf16_flops(name: str, dtype) -> float | None:
+    if dtype not in (torch.float16, torch.bfloat16):
+        return None  # a bf16 peak wouldn't describe fp32/int8 runs honestly
+    up = name.upper()
+    for key in sorted(_PEAK_BF16_TFLOPS, key=len, reverse=True):
+        if key in up:
+            return _PEAK_BF16_TFLOPS[key] * 1e12
+    return None
+
 
 def resolve_device(name: str) -> torch.device:
     if name != "auto":
@@ -76,6 +98,43 @@ class TorchModelRunner:
 
     def set_prompt_embeds(self, request_id: str, embeds: torch.Tensor) -> None:
         self._prompt_embeds[request_id] = embeds.to(self.device, self.dtype)
+
+    def static_info(self) -> dict:
+        """One-time device + model facts for the dashboard: GPU identity, and the
+        constants MFU needs (param count, per-token FLOPs, bf16 peak). Peak is a
+        labelled per-GPU lookup — MFU is omitted (not faked) for GPUs we don't
+        have a verified number for, or for dtypes where a bf16 peak doesn't apply."""
+        if self.device.type != "cuda":
+            return {"device": str(self.device)}
+        idx = self.device.index or 0
+        name = torch.cuda.get_device_name(idx)
+        _, total = torch.cuda.mem_get_info(self.device)
+        cc = torch.cuda.get_device_capability(idx)
+        n_params = sum(p.numel() for p in self.model.parameters())
+        info = {
+            "gpu_name": name,
+            "gpu_index": idx,
+            "gpu_count": torch.cuda.device_count(),  # GPUs present; inferneo uses 1
+            "vram_bytes": total,
+            "compute_capability": f"{cc[0]}.{cc[1]}",
+            "cuda_version": torch.version.cuda,
+            "dtype": str(self.dtype).replace("torch.", ""),
+            "n_params": n_params,
+            "flops_per_token": 2 * n_params,  # forward pass ≈ 2 FLOPs / param / token
+            "peak_flops": _peak_bf16_flops(name, self.dtype),
+        }
+        try:
+            import pynvml
+
+            if not getattr(self, "_nvml_ready", False):
+                pynvml.nvmlInit()
+                self._nvml_handle = pynvml.nvmlDeviceGetHandleByIndex(idx)
+                self._nvml_ready = True
+            drv = pynvml.nvmlSystemGetDriverVersion()
+            info["driver_version"] = drv.decode() if isinstance(drv, bytes) else drv
+        except Exception:  # noqa: BLE001
+            pass
+        return info
 
     def gpu_stats(self) -> dict | None:
         """Live GPU signals for the stats collector: device memory always, plus

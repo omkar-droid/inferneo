@@ -46,7 +46,9 @@ class InferneoEngine:
         self._step_count = 0
         # Runtime telemetry for the dashboard / Prometheus. Torch-free collector;
         # GPU numbers come from the runner's probe.
-        self.stats = StatsCollector(gpu_probe=self.runner.gpu_stats)
+        self.stats = StatsCollector(
+            gpu_probe=self.runner.gpu_stats, static_info=self.runner.static_info()
+        )
         self.input_processor = self._build_input_processor()
 
     def _build_input_processor(self) -> InputProcessor:

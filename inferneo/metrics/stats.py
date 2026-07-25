@@ -28,8 +28,9 @@ class StatsCollector:
     """One sample per engine step -> windowed rates + cumulative counters."""
 
     def __init__(self, gpu_probe: Callable[[], dict | None] | None = None,
-                 window_s: float = 30.0):
+                 static_info: dict | None = None, window_s: float = 30.0):
         self._gpu_probe = gpu_probe
+        self._info = static_info or {}
         self._window = window_s
         self._lock = threading.Lock()
         self._t0 = time.monotonic()
@@ -44,7 +45,7 @@ class StatsCollector:
         self.total_finished = 0
         self.total_preemptions = 0
         # rolling windows of (timestamp, value)
-        self._steps: deque[tuple[float, int, int]] = deque()  # (t, gen, processed)
+        self._steps: deque[tuple[float, int, int, int]] = deque()  # (t, gen, proc, preempt)
         self._ttft: deque[tuple[float, float]] = deque()      # (t, ms)
         self._tpot: deque[tuple[float, float]] = deque()
         self._e2e: deque[tuple[float, float]] = deque()
@@ -71,7 +72,7 @@ class StatsCollector:
             self.total_prompt_tokens += max(processed_tokens - generation_tokens, 0)
             self.total_generation_tokens += generation_tokens
             self.total_preemptions += preemptions
-            self._steps.append((now, generation_tokens, processed_tokens))
+            self._steps.append((now, generation_tokens, processed_tokens, preemptions))
             for ttft, tpot, e2e in finished_latencies:
                 self.total_finished += 1
                 if ttft is not None:
@@ -92,9 +93,12 @@ class StatsCollector:
         now = time.monotonic()
         with self._lock:
             self._evict(now)
+            n = len(self._steps)
             span = max(now - self._steps[0][0], 1e-6) if self._steps else 1.0
             gen = sum(s[1] for s in self._steps)
             proc = sum(s[2] for s in self._steps)
+            preempt = sum(s[3] for s in self._steps)
+            gen_tps = gen / span
             ttfts = sorted(v for _, v in self._ttft)
             tpots = sorted(v for _, v in self._tpot)
             e2es = sorted(v for _, v in self._e2e)
@@ -103,8 +107,16 @@ class StatsCollector:
                 "running": self.running,
                 "waiting": self.waiting,
                 "kv_cache_usage": self.kv_usage,
-                "generation_tps": gen / span,
+                "generation_tps": gen_tps,
                 "processed_tps": proc / span,
+                # avg output tokens produced per step -> the effective decode batch;
+                # small values mean the engine is launch/latency-bound (CUDA-graph
+                # territory), large values mean it's amortizing the forward well.
+                "effective_batch": gen / n if n else 0.0,
+                # what fraction of processed tokens were prefill (vs decode) — high
+                # means prefill is competing with decode for the forward.
+                "prefill_fraction": (proc - gen) / proc if proc > 0 else 0.0,
+                "preemptions_per_s": preempt / span,
                 "ttft_ms": {"p50": _pct(ttfts, 0.5), "p99": _pct(ttfts, 0.99)},
                 "tpot_ms": {"p50": _pct(tpots, 0.5), "p99": _pct(tpots, 0.99)},
                 "e2e_ms": {"p50": _pct(e2es, 0.5), "p99": _pct(e2es, 0.99)},
@@ -115,7 +127,15 @@ class StatsCollector:
                     "finished_requests": self.total_finished,
                     "preemptions": self.total_preemptions,
                 },
+                "info": self._info,
             }
+            # MFU: achieved forward FLOP/s vs the GPU's bf16 peak. Only when we have
+            # both the per-token FLOPs (from param count) and a verified peak.
+            fpt = self._info.get("flops_per_token")
+            peak = self._info.get("peak_flops")
+            achieved = fpt * gen_tps if fpt else None
+            snap["achieved_tflops"] = achieved / 1e12 if achieved else None
+            snap["mfu"] = (achieved / peak) if (achieved and peak) else None
         gpu = self._gpu_probe() if self._gpu_probe else None
         if gpu:
             snap["gpu"] = gpu
@@ -143,6 +163,18 @@ def prometheus_text(snap: dict) -> str:
           "Fraction of KV-cache blocks in use")
     gauge("inferneo_generation_tokens_per_second", round(snap["generation_tps"], 3),
           "Output tokens per second (rolling window)")
+    gauge("inferneo_effective_batch_size", round(snap["effective_batch"], 3),
+          "Mean output tokens per step (effective decode batch)")
+    gauge("inferneo_prefill_token_fraction", round(snap["prefill_fraction"], 4),
+          "Fraction of processed tokens that were prefill")
+    gauge("inferneo_preemptions_per_second", round(snap["preemptions_per_s"], 4),
+          "Request preemptions per second (rolling window)")
+    if snap.get("achieved_tflops") is not None:
+        gauge("inferneo_achieved_tflops", round(snap["achieved_tflops"], 3),
+              "Achieved forward compute (TFLOP/s)")
+    if snap.get("mfu") is not None:
+        gauge("inferneo_mfu_ratio", round(snap["mfu"], 5),
+              "Model FLOPs utilization vs bf16 dense peak")
     for stat in ("ttft", "tpot", "e2e"):
         for p in ("p50", "p99"):
             gauge(f"inferneo_{stat}_ms_{p}", round(snap[f"{stat}_ms"][p], 3),
@@ -158,6 +190,19 @@ def prometheus_text(snap: dict) -> str:
     counter("inferneo_preemptions_total", t["preemptions"],
             "Request preemptions since start")
 
+    info = snap.get("info") or {}
+    if info.get("gpu_name"):
+        labels = (
+            f'gpu_name="{info["gpu_name"]}",'
+            f'cuda="{info.get("cuda_version", "")}",'
+            f'compute_capability="{info.get("compute_capability", "")}",'
+            f'driver="{info.get("driver_version", "")}",'
+            f'gpu_count="{info.get("gpu_count", 1)}"'
+        )
+        lines.append("# HELP inferneo_gpu_info Static GPU/build identity (value is always 1)")
+        lines.append("# TYPE inferneo_gpu_info gauge")
+        lines.append(f"inferneo_gpu_info{{{labels}}} 1")
+
     gpu = snap.get("gpu")
     if gpu:
         gauge("inferneo_gpu_memory_used_bytes", gpu["mem_used_bytes"], "GPU memory in use")
@@ -165,6 +210,9 @@ def prometheus_text(snap: dict) -> str:
         if "sm_util" in gpu:
             gauge("inferneo_gpu_sm_utilization_ratio", round(gpu["sm_util"], 4),
                   "GPU SM utilization")
+        if "mem_bw_util" in gpu:
+            gauge("inferneo_gpu_memory_bandwidth_util_ratio", round(gpu["mem_bw_util"], 4),
+                  "GPU HBM bandwidth utilization (the decode ceiling)")
         if "power_w" in gpu:
             gauge("inferneo_gpu_power_watts", round(gpu["power_w"], 1), "GPU power draw")
         if "temp_c" in gpu:

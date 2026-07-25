@@ -53,6 +53,11 @@ DASHBOARD_HTML = r"""<!doctype html>
   @keyframes pulse{0%{box-shadow:0 0 0 0 currentColor}70%{box-shadow:0 0 0 6px transparent}
     100%{box-shadow:0 0 0 0 transparent}}
   .up{color:var(--muted);font-size:12px;font-family:var(--mono);white-space:nowrap}
+  .devbar{display:flex;gap:20px;flex-wrap:wrap;padding:9px 24px;
+    border-bottom:1px solid var(--line);background:#0c1219;color:var(--muted);
+    font-family:var(--mono);font-size:11.5px;letter-spacing:.3px}
+  .devbar b{color:var(--text);font-weight:600}
+  .devbar .using{color:var(--good)}
   main{padding:22px;max-width:1180px;margin:0 auto}
   .grid{display:grid;gap:15px;grid-template-columns:repeat(4,1fr)}
   .card{background:var(--panel);border:1px solid var(--line);border-radius:13px;
@@ -87,6 +92,14 @@ DASHBOARD_HTML = r"""<!doctype html>
   <div class="pill idle" id="status"><span class="dot"></span><span id="status_t">—</span></div>
   <div class="up" id="uptime">—</div>
 </header>
+<div class="devbar" id="devbar" style="display:none">
+  <span><b id="d_gpu">—</b></span>
+  <span id="d_vram">—</span>
+  <span id="d_cuda">—</span>
+  <span id="d_cc">—</span>
+  <span id="d_drv">—</span>
+  <span class="using" id="d_cnt">—</span>
+</div>
 <main>
   <div class="grid">
     <div class="card span2">
@@ -109,9 +122,31 @@ DASHBOARD_HTML = r"""<!doctype html>
       <div class="bar"><i id="smbar" style="width:0%"></i></div>
     </div>
     <div class="card">
+      <h3>HBM bandwidth</h3>
+      <div><span class="val" id="hbm">—</span><span class="unit">%</span></div>
+      <div class="bar"><i id="hbmbar" style="width:0%"></i></div>
+      <div class="sub">the decode ceiling</div>
+    </div>
+
+    <div class="card">
+      <h3>Effective batch</h3>
+      <div><span class="val" id="ebatch">0</span><span class="unit">tok/step</span></div>
+      <div class="sub" id="prefill">prefill —</div>
+    </div>
+    <div class="card">
+      <h3>MFU</h3>
+      <div><span class="val" id="mfu">—</span><span class="unit" id="mfu_u">%</span></div>
+      <div class="sub" id="mfu_sub">bf16 peak</div>
+    </div>
+    <div class="card">
       <h3>KV cache</h3>
       <div><span class="val" id="kv">0</span><span class="unit">%</span></div>
       <div class="bar"><i id="kvbar" style="width:0%"></i></div>
+    </div>
+    <div class="card">
+      <h3>Preemptions</h3>
+      <div><span class="val" id="preempt">0</span><span class="unit">/s</span></div>
+      <div class="sub">KV pressure</div>
     </div>
 
     <div class="card span2">
@@ -170,6 +205,29 @@ function render(s){
   $('kv').textContent = kv.toFixed(kv<10?1:0); $('kvbar').style.width=kv+'%';
   $('kvbar').style.background = utilColor(s.kv_cache_usage);
 
+  $('ebatch').textContent = s.effective_batch.toFixed(0);
+  $('prefill').textContent = 'prefill '+(s.prefill_fraction*100).toFixed(0)+'% of tokens';
+  $('preempt').textContent = s.preemptions_per_s.toFixed(2);
+  if(s.mfu != null){
+    $('mfu').textContent = (s.mfu*100).toFixed(1); $('mfu_u').textContent = '%';
+    $('mfu_sub').textContent = s.achieved_tflops.toFixed(0)+' TFLOP/s · memory-bound in decode';
+  } else if(s.achieved_tflops != null){
+    $('mfu').textContent = s.achieved_tflops.toFixed(0); $('mfu_u').textContent = 'TFLOP/s';
+    $('mfu_sub').textContent = 'peak unknown for this GPU';
+  } else { $('mfu').textContent='—'; $('mfu_sub').textContent='needs a CUDA fp16/bf16 run'; }
+
+  const inf = s.info || {};
+  if(inf.gpu_name){
+    $('devbar').style.display='flex';
+    $('d_gpu').textContent = inf.gpu_name;
+    $('d_vram').textContent = fmtGB(inf.vram_bytes)+' GB';
+    $('d_cuda').textContent = 'CUDA '+inf.cuda_version;
+    $('d_cc').textContent = 'sm_'+String(inf.compute_capability||'').replace('.','');
+    $('d_drv').textContent = inf.driver_version ? 'driver '+inf.driver_version : '';
+    const n = inf.gpu_count||1;
+    $('d_cnt').textContent = n+' GPU'+(n>1?'s':'')+' present · using 1';
+  }
+
   $('ttft50').textContent=s.ttft_ms.p50.toFixed(0); $('ttft99').textContent=s.ttft_ms.p99.toFixed(0);
   $('tpot50').textContent=s.tpot_ms.p50.toFixed(1); $('tpot99').textContent=s.tpot_ms.p99.toFixed(1);
   $('e2e50').textContent=s.e2e_ms.p50.toFixed(0); $('e2e99').textContent=s.e2e_ms.p99.toFixed(0);
@@ -188,6 +246,8 @@ function render(s){
     mem_hist.push(frac); if(mem_hist.length>HIST) mem_hist.shift();
     if('sm_util' in g){ const u=g.sm_util*100; $('smutil').textContent=u.toFixed(0);
       $('smbar').style.width=u+'%'; $('smbar').style.background=utilColor(g.sm_util); }
+    if('mem_bw_util' in g){ const b=g.mem_bw_util*100; $('hbm').textContent=b.toFixed(0);
+      $('hbmbar').style.width=b+'%'; $('hbmbar').style.background=utilColor(g.mem_bw_util); }
     const bits=[];
     if('sm_util' in g) bits.push('SM '+(g.sm_util*100).toFixed(0)+'%');
     if('power_w' in g) bits.push(g.power_w.toFixed(0)+' W');
