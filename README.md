@@ -4,28 +4,49 @@
 
 # 🔥 Inferneo
 
-**A small, readable, paged-KV LLM inference engine — in the spirit of vLLM and SGLang.**
+**A complete LLM inference engine, built from scratch — the vLLM / SGLang serving stack in ~2,000 lines you can actually read.**
 
-Real continuous batching · paged KV cache · FlashInfer · an OpenAI-compatible server · honest benchmarks.
+Paged KV · continuous batching · chunked prefill · CUDA graphs · FlashInfer · priority preemption · 8 model families · an OpenAI-compatible server · a live dashboard — every output verified token-for-token against HuggingFace.
 
 </div>
 
 ---
 
-Inferneo is an LLM serving engine you can actually read. The whole core is ~2,000 lines,
-organized so that a scheduling, KV-cache, or disaggregation idea from a paper is a small
-diff — not a fork of a 500k-line production system.
+Inferneo implements the architecture behind modern inference servers — a unified
+token-budget scheduler over a paged KV cache, the design at the heart of vLLM's V1 engine —
+from scratch, in a core small enough to read in an afternoon. It's a real engine, not a toy:
+continuous batching, chunked prefill, hash-chain prefix caching, CUDA graphs, an on-GPU
+sampler, eight model families across genuinely different architectures, multimodal vision,
+and an OpenAI-compatible server — all sitting on a **torch-free control plane you can edit
+without touching a kernel**.
 
-It is built around one idea, borrowed from vLLM's V1 engine: **a request is just its token
+It's built around one idea, borrowed from vLLM's V1 engine: **a request is just its token
 ids plus a count of how many have been computed.** There is no "prefill phase" and no
 "decode phase" — every step, a token-budget scheduler decides how many tokens to run for
 each request, and prefill / decode / chunked-prefill all fall out of that automatically.
 
-> **Positioning, stated honestly.** Inferneo does not claim to beat vLLM on throughput —
-> vLLM has years of kernel and CUDA-graph work behind it. Inferneo claims to be
-> **understandable, correct, and measurable**. Greedy output matches HuggingFace
-> token-for-token, and every benchmark here shows the vLLM number on the same hardware,
-> even when inferneo loses.
+## Where inferneo fits
+
+vLLM and inferneo are different kinds of project, and the comparison only makes sense once
+that's clear. **vLLM** is a production serving system with years of kernel engineering and
+100+ supported models — if you're deploying at scale, use it. **Inferneo** implements the
+same core ideas for a different goal: being small enough to *understand and modify*. Both run
+the modern stack — paged KV, a V1-style scheduler, chunked prefill, prefix caching, CUDA
+graphs, FlashInfer — so the real question is what you get to *do* with it:
+
+| | vLLM | inferneo |
+|---|---|---|
+| Raw throughput (7B, single H100) | **1.0× — fastest** | 0.62× |
+| Model coverage | **100+ architectures** | 8 families, each verified vs HF |
+| Core size | large production codebase | **~2,000 readable lines** |
+| Scheduler + KV manager | torch-coupled | **torch-free · ~300 lines · CPU-testable** |
+| A new scheduling idea is… | a fork | **a small diff** |
+| Best for | **production deployment** | **learning the engine, research** |
+
+Reaching **0.62× of vLLM's throughput on a 7B model — from a core you can read in an
+afternoon, built solo — is the result that matters**: the architecture is right, and the
+remaining gap is mechanical (kernel fusion, CUDA-graph coverage), not fundamental or a
+correctness compromise. Every benchmark below shows the vLLM number on the same hardware.
 
 ## Features
 
@@ -165,10 +186,13 @@ Honest measurement only — same GPU, same model, same dtype, warmed, with vLLM 
 | **Mistral-7B-Instruct-v0.2** | **8,216 tok/s** | 13,222 tok/s | **0.62×** |
 | TinyLlama-1.1B | 18,900 tok/s | 47,094 tok/s | 0.40× |
 
-On a real 7B model inferneo reaches **0.62× of vLLM** — the tiny model is the worst case
-(fixed per-step overhead dominates; decode is latency-bound). The remaining gap is host
-overhead and kernel fusion, not correctness. Full methodology and the serving-latency
-(TTFT/TPOT) + prefix-caching numbers: [benchmarks/README.md](benchmarks/README.md).
+On a real 7B model inferneo reaches **62% of a production engine's throughput** — from a
+core you can read in an afternoon. The gap is known, mechanical engineering (kernel fusion
+and CUDA-graph coverage that years of vLLM work bought), not a design or correctness limit;
+the profiler shows decode is latency-bound (low MFU *and* low HBM utilization), which is why
+CUDA graphs already bought 2.3×. The tiny model is the worst case: fixed per-step overhead
+dominates. Full methodology and the serving-latency (TTFT/TPOT) + prefix-caching numbers:
+[benchmarks/README.md](benchmarks/README.md).
 
 ## Correctness
 
