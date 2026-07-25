@@ -22,6 +22,24 @@ class RMSNorm(nn.Module):
         return self.weight * x.to(dtype)
 
 
+class GemmaRMSNorm(nn.Module):
+    """Gemma's RMSNorm, which differs from Llama's in two ways that matter for
+    exact numerics: the scale is ``(1 + weight)`` (weights are stored centered at
+    zero), and the whole computation — including the scale — stays in float32
+    before casting back. Matches HF ``GemmaRMSNorm``."""
+
+    def __init__(self, hidden_size: int, eps: float):
+        super().__init__()
+        self.weight = nn.Parameter(torch.zeros(hidden_size))
+        self.eps = eps
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        out = x.float()
+        out = out * torch.rsqrt(out.pow(2).mean(-1, keepdim=True) + self.eps)
+        out = out * (1.0 + self.weight.float())
+        return out.type_as(x)
+
+
 def _llama3_scaled_inv_freq(inv_freq: torch.Tensor, rope_scaling: dict) -> torch.Tensor:
     """Llama-3.x rope scaling (matches HF's ``_compute_llama3_parameters``)."""
     factor = rope_scaling["factor"]
@@ -109,12 +127,14 @@ def get_rope_parameters(config) -> dict:
 class RotaryEmbedding(nn.Module):
     """Rotary position embedding over flat token batches ([num_tokens, H, D])."""
 
-    def __init__(self, head_dim: int, rope_parameters: dict):
+    def __init__(self, head_dim: int, rope_parameters: dict, rotary_dim: int | None = None):
         super().__init__()
         base = rope_parameters["rope_theta"]
-        inv_freq = 1.0 / (
-            base ** (torch.arange(0, head_dim, 2, dtype=torch.float32) / head_dim)
-        )
+        # Partial rotary (Phi): rotate only the first `rotary_dim` of each head's
+        # channels, pass the rest through untouched. Default = rotate everything.
+        self.rotary_dim = rotary_dim or head_dim
+        dim = self.rotary_dim
+        inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2, dtype=torch.float32) / dim))
         rope_type = rope_parameters.get("rope_type", "default")
         # YaRN re-sharpens the attention logits; every other type leaves them be.
         self.attention_scaling = 1.0
@@ -122,7 +142,7 @@ class RotaryEmbedding(nn.Module):
             inv_freq = _llama3_scaled_inv_freq(inv_freq, rope_parameters)
         elif rope_type == "yarn":
             inv_freq, self.attention_scaling = _yarn_scaled_inv_freq(
-                inv_freq, rope_parameters, head_dim, base
+                inv_freq, rope_parameters, dim, base
             )
         elif rope_type in ("linear", "dynamic"):
             # Position interpolation: squash every dimension by the same factor.
@@ -137,10 +157,16 @@ class RotaryEmbedding(nn.Module):
         self, positions: torch.Tensor, q: torch.Tensor, k: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
         freqs = positions.to(torch.float32)[:, None] * self.inv_freq[None, :]
-        emb = torch.cat((freqs, freqs), dim=-1)  # [T, D]
-        cos = (emb.cos() * self.attention_scaling).to(q.dtype)[:, None, :]  # [T, 1, D]
+        emb = torch.cat((freqs, freqs), dim=-1)  # [T, rotary_dim]
+        cos = (emb.cos() * self.attention_scaling).to(q.dtype)[:, None, :]  # [T, 1, rot]
         sin = (emb.sin() * self.attention_scaling).to(q.dtype)[:, None, :]
-        return _rotate(q, cos, sin), _rotate(k, cos, sin)
+        if self.rotary_dim == q.shape[-1]:
+            return _rotate(q, cos, sin), _rotate(k, cos, sin)
+        return self._partial(q, cos, sin), self._partial(k, cos, sin)
+
+    def _partial(self, x, cos, sin):
+        x_rot, x_pass = x[..., : self.rotary_dim], x[..., self.rotary_dim :]
+        return torch.cat((_rotate(x_rot, cos, sin), x_pass), dim=-1)
 
 
 def _rotate(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:

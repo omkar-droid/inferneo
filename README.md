@@ -35,10 +35,14 @@ each request, and prefill / decode / chunked-prefill all fall out of that automa
   queued batch backlog, and when every slot is full it *evicts* the lowest-priority running job
   (strict-inequality eviction, so no thrashing). In a fully-saturated engine, an urgent request's
   time-to-first-token drops from blocked-indefinitely to 1 step.
-- **Model-general, not Llama-only** — Llama 2/3, TinyLlama, Mistral, **Qwen2.5, Qwen3** load from
-  HuggingFace safetensors directly. The engine is architecture-agnostic; a new family is a registry
-  entry plus (at most) a small attention subclass — Qwen2 is "Llama + qkv bias", Qwen3 adds per-head
-  QK-norm, each ~4 lines. Verified token-for-token vs HuggingFace.
+- **Model-general, across genuinely different architectures** — Llama 2/3, TinyLlama, Mistral,
+  Qwen2.5, Qwen3, and now **GPT-2, Gemma, and Phi** load from HuggingFace safetensors directly. This
+  isn't "Llama with small tweaks": GPT-2 has *no* RoPE (learned absolute positions) and LayerNorm;
+  Phi uses partial-rotary RoPE and a parallel attention+MLP block; Gemma uses GeGLU, a `(1+weight)`
+  RMSNorm, and √hidden embedding scaling. The engine (paged KV, scheduler, CUDA graphs, sampler)
+  is unchanged across all of them — a new family is a registry entry plus a small model file.
+  Verified token-for-token vs HuggingFace (GPT-2 and Phi-2 exact on the real checkpoints; every
+  family greedy-identical to HF on the CPU correctness suite).
 - **Multimodal**: LLaVA vision support — a CLIP tower + projector produce image embeddings that are
   spliced into the token sequence, so the paged KV cache, scheduler and CUDA graphs treat an image
   as just rows in the sequence. OpenAI multimodal message content is accepted as-is.
@@ -183,7 +187,7 @@ inferneo/
   kv/          block_pool.py · block_manager.py · hashing.py                       (control plane, no torch)
   executor/    torch_runner.py                                                     (tensor plane)
   attention/   sdpa_backend.py · flashinfer_backend.py · selector.py
-  models/      llama.py · layers.py · loader.py · registry.py
+  models/      llama.py · qwen.py · gemma.py · phi.py · gpt2.py · layers.py · loader.py · registry.py
   sampling/    sampler.py        tokenizer/       server/  (OpenAI API)
 tests/         unit (torch-free) · correctness (vs HF) · e2e (HTTP)
 benchmarks/    baselines/hf_padded_engine.py · offline_throughput.py

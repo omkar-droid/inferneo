@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from inferneo.models.gemma import GemmaForCausalLM
+from inferneo.models.gpt2 import GPT2LMHeadModel
 from inferneo.models.llama import LlamaForCausalLM
+from inferneo.models.phi import PhiForCausalLM
 from inferneo.models.qwen import Qwen2ForCausalLM, Qwen3ForCausalLM
 
 # Adding a model family is a registry entry + (at most) a small attention subclass;
@@ -14,6 +17,9 @@ MODEL_REGISTRY: dict[str, type] = {
     "MistralForCausalLM": LlamaForCausalLM,
     "Qwen2ForCausalLM": Qwen2ForCausalLM,
     "Qwen3ForCausalLM": Qwen3ForCausalLM,
+    "GemmaForCausalLM": GemmaForCausalLM,
+    "PhiForCausalLM": PhiForCausalLM,
+    "GPT2LMHeadModel": GPT2LMHeadModel,
 }
 
 

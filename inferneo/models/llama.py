@@ -80,12 +80,19 @@ class LlamaMLP(nn.Module):
 
 
 class LlamaDecoderLayer(nn.Module):
-    def __init__(self, config, backend: AttentionBackend, attention_cls=LlamaAttention):
+    def __init__(
+        self,
+        config,
+        backend: AttentionBackend,
+        attention_cls=LlamaAttention,
+        mlp_cls=LlamaMLP,
+        norm_cls=RMSNorm,
+    ):
         super().__init__()
         self.self_attn = attention_cls(config, backend)
-        self.mlp = LlamaMLP(config)
-        self.input_layernorm = RMSNorm(config.hidden_size, config.rms_norm_eps)
-        self.post_attention_layernorm = RMSNorm(config.hidden_size, config.rms_norm_eps)
+        self.mlp = mlp_cls(config)
+        self.input_layernorm = norm_cls(config.hidden_size, config.rms_norm_eps)
+        self.post_attention_layernorm = norm_cls(config.hidden_size, config.rms_norm_eps)
 
     def forward(self, x, positions, rotary, kv_cache, attn_metadata):
         x = x + self.self_attn(
@@ -95,18 +102,28 @@ class LlamaDecoderLayer(nn.Module):
 
 
 class LlamaModel(nn.Module):
-    def __init__(self, config, backend: AttentionBackend, attention_cls=LlamaAttention):
+    def __init__(
+        self,
+        config,
+        backend: AttentionBackend,
+        attention_cls=LlamaAttention,
+        mlp_cls=LlamaMLP,
+        norm_cls=RMSNorm,
+        scale_embeddings=False,
+    ):
         super().__init__()
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size)
         self.layers = nn.ModuleList(
-            LlamaDecoderLayer(config, backend, attention_cls)
+            LlamaDecoderLayer(config, backend, attention_cls, mlp_cls, norm_cls)
             for _ in range(config.num_hidden_layers)
         )
-        self.norm = RMSNorm(config.hidden_size, config.rms_norm_eps)
+        self.norm = norm_cls(config.hidden_size, config.rms_norm_eps)
         head_dim = getattr(config, "head_dim", None) or (
             config.hidden_size // config.num_attention_heads
         )
         self.rotary = RotaryEmbedding(head_dim, get_rope_parameters(config))
+        # Gemma multiplies the embeddings by sqrt(hidden_size) before layer 0.
+        self.embedding_multiplier = config.hidden_size**0.5 if scale_embeddings else None
 
     def forward(self, input_ids, positions, kv_caches, attn_metadata, inputs_embeds=None):
         # `inputs_embeds` lets a caller supply the embedding sequence directly —
@@ -116,19 +133,32 @@ class LlamaModel(nn.Module):
         # in the sequence. Decode always uses input_ids, so the CUDA-graph path
         # is untouched.
         x = inputs_embeds if inputs_embeds is not None else self.embed_tokens(input_ids)
+        if self.embedding_multiplier is not None:
+            # Cast the multiplier to x's dtype first, matching HF's rounding.
+            x = x * torch.tensor(self.embedding_multiplier, dtype=x.dtype, device=x.device)
         for layer, kv_cache in zip(self.layers, kv_caches):
             x = layer(x, positions, self.rotary, kv_cache, attn_metadata)
         return self.norm(x)
 
 
 class LlamaForCausalLM(nn.Module):
-    # Subclasses (other families) override this with their attention variant.
+    # Subclasses (other families) override these with their variants.
     attention_cls = LlamaAttention
+    mlp_cls = LlamaMLP
+    norm_cls = RMSNorm
+    scale_embeddings = False
 
     def __init__(self, config, backend: AttentionBackend):
         super().__init__()
         self.config = config
-        self.model = LlamaModel(config, backend, self.attention_cls)
+        self.model = LlamaModel(
+            config,
+            backend,
+            self.attention_cls,
+            self.mlp_cls,
+            self.norm_cls,
+            self.scale_embeddings,
+        )
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
 
     def forward(
