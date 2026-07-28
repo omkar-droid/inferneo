@@ -8,6 +8,14 @@
 
 Paged KV · continuous batching · chunked prefill · CUDA graphs · FlashInfer · priority preemption · 8 model families · an OpenAI-compatible server · a live dashboard — every output verified token-for-token against HuggingFace.
 
+<p>
+<a href="https://github.com/omkar-droid/inferneo/actions/workflows/ci.yml"><img src="https://github.com/omkar-droid/inferneo/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+<img src="https://img.shields.io/badge/python-3.10+-3776ab.svg" alt="Python 3.10+">
+<img src="https://img.shields.io/badge/PyTorch-2.4+-ee4c2c.svg" alt="PyTorch 2.4+">
+<img src="https://img.shields.io/badge/correctness-token--for--token%20vs%20HuggingFace-4ea1ff.svg" alt="Verified vs HuggingFace">
+<img src="https://img.shields.io/badge/license-Apache%202.0-3fb950.svg" alt="Apache 2.0">
+</p>
+
 </div>
 
 ---
@@ -223,6 +231,21 @@ tests/         unit (torch-free) · correctness (vs HF) · e2e (HTTP)
 benchmarks/    baselines/hf_padded_engine.py · offline_throughput.py
 examples/      offline_inference.py
 ```
+
+## Related projects
+
+Inferneo runs its attention through FlashInfer's kernels — these two repos are where I build
+and benchmark that same math *from scratch*, one kernel at a time:
+
+- **[llm-cuda-kernels](https://github.com/omkar-droid/llm-cuda-kernels)** — hand-written CUDA
+  for the ops inside a Llama forward pass (SiLU, RMSNorm, LayerNorm, a working FlashAttention),
+  each built up from a naive version, optimized against the bottleneck it exposes, and
+  benchmarked honestly on an H100 with a correctness check.
+- **[cuda-softmax-worklog](https://github.com/omkar-droid/cuda-softmax-worklog)** — a deep dive
+  on a single kernel: softmax, iterated from naive to 58% of peak HBM bandwidth, beating
+  `torch.softmax`.
+
+Inferneo is the engine; those are the kernels underneath it.
 
 ## License
 
