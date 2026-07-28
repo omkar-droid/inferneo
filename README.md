@@ -246,21 +246,6 @@ benchmarks/    baselines/hf_padded_engine.py · offline_throughput.py
 examples/      offline_inference.py
 ```
 
-## Related projects
-
-Inferneo runs its attention through FlashInfer's kernels — these two repos are where I build
-and benchmark that same math *from scratch*, one kernel at a time:
-
-- **[llm-cuda-kernels](https://github.com/omkar-droid/llm-cuda-kernels)** — hand-written CUDA
-  for the ops inside a Llama forward pass (SiLU, RMSNorm, LayerNorm, a working FlashAttention),
-  each built up from a naive version, optimized against the bottleneck it exposes, and
-  benchmarked honestly on an H100 with a correctness check.
-- **[cuda-softmax-worklog](https://github.com/omkar-droid/cuda-softmax-worklog)** — a deep dive
-  on a single kernel: softmax, iterated from naive to 58% of peak HBM bandwidth, beating
-  `torch.softmax`.
-
-Inferneo is the engine; those are the kernels underneath it.
-
 ## License
 
 Apache-2.0.
