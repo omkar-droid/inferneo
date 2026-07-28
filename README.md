@@ -56,6 +56,20 @@ afternoon, built solo — is the result that matters**: the architecture is righ
 remaining gap is mechanical (kernel fusion, CUDA-graph coverage), not fundamental or a
 correctness compromise. Every benchmark below shows the vLLM number on the same hardware.
 
+## Live dashboard
+
+<p align="center">
+<img src="docs/dashboard.png" alt="inferneo's built-in /dashboard under load on an H100 NVL" width="900">
+</p>
+
+The built-in **`/dashboard`** is a single self-contained page — no Prometheus, no Grafana — that
+polls `/stats` and shows GPU identity, throughput, **HBM + SM utilization**, **MFU**, effective
+batch, KV-cache occupancy, running-vs-waiting, and TTFT/TPOT percentiles. Above, it's replaying a
+real H100 capture: **256 requests against a 64-slot engine at the saturated moment.** The story it
+tells is the useful one — MFU 4.3% *and* HBM 19% at batch 64 means the GPU is neither compute- nor
+memory-bound, i.e. **latency-bound**, which is exactly the regime CUDA graphs target. A `/metrics`
+endpoint is exposed alongside for anyone who'd rather scrape it into Grafana.
+
 ## Features
 
 - **Paged KV cache + continuous batching** with chunked prefill and preemption under memory pressure.
